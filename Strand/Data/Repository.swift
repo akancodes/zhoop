@@ -1234,6 +1234,23 @@ final class Repository: ObservableObject {
         return parts.joined(separator: "|")
     }
 
+    /// The fingerprint of everything `hrSamples(from:to:limit:)` below can return: `hrFingerprintUnion`'s
+    /// measured rows plus the PPG-derived rows that read falls back to, over the same ids.
+    ///
+    /// For a cache over that read's RESULT, which `hrFingerprintUnion` alone cannot guard: a WHOOP 5 offload
+    /// of a PPG-only stretch changes the read and leaves the measured fingerprint unmoved. Its one caller is
+    /// the iOS Apple Health energy write (fork), which skips a day whose fingerprint has not moved.
+    func hrReadFingerprintUnion(from: Int, to: Int) async -> String {
+        guard let store = await ensureStore() else { return "" }
+        var parts: [String] = []
+        for id in rawPhysiologyReadIds(store: store) {
+            let hr = (try? await store.hrFingerprint(deviceId: id, from: from, to: to)) ?? (count: 0, maxTs: 0)
+            let ppg = (try? await store.ppgHrFingerprint(deviceId: id, from: from, to: to)) ?? (count: 0, maxTs: 0)
+            parts.append("\(id):\(hr.count):\(hr.maxTs):\(ppg.count):\(ppg.maxTs)")
+        }
+        return parts.joined(separator: "|")
+    }
+
     func hrSamples(from: Int, to: Int, limit: Int = 8000) async -> [HRSample] {
         guard let store = await ensureStore() else { return [] }
         // UNION the active strap + canonical so the HR trend renders whether the landed day's raw sits under

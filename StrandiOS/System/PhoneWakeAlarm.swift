@@ -28,9 +28,15 @@ enum PhoneWakeAlarm {
     /// The Alarms screen's switch. OFF until the wearer turns it on.
     nonisolated static let enabledKey = "alarm.phone.enabled"
 
-    /// Set once anything has been scheduled, so that with the switch off and nothing of ours scheduled this
-    /// never touches AlarmKit at all: no read of its state, no prompt, no change.
+    /// Set as soon as anything may be scheduled, so that with the switch off and nothing of ours scheduled
+    /// this never touches AlarmKit at all: no read of its state, no prompt, no change.
     private static let scheduledKey = "alarm.phone.scheduled"
+
+    /// True once the last sync left every wanted alarm scheduled with AlarmKit; false after a refusal, a
+    /// failure, or with nothing wanted. The Alarms screen reads this, not the switch, before it promises a
+    /// ring: the switch says what he asked for, this says what iOS holds. Every foreground re-sync
+    /// (`applySmartAlarm`) refreshes it, so a permission withdrawn in Settings shows on the next open.
+    nonisolated static let armedKey = "alarm.phone.armed"
 
     nonisolated static var isEnabled: Bool { UserDefaults.standard.bool(forKey: enabledKey) }
 
@@ -120,6 +126,9 @@ enum PhoneWakeAlarm {
         let wanted = alarmOn && isEnabled
         let defaults = UserDefaults.standard
         guard wanted || defaults.bool(forKey: scheduledKey) else { return }
+        // Marked before the reconcile runs, not after it schedules: a switch-off that lands while the first
+        // schedule is still in flight must queue its cancel behind it rather than find nothing to undo.
+        if wanted { defaults.set(true, forKey: scheduledKey) }
         #if canImport(AlarmKit)
         if #available(iOS 26.0, *) {
             let wantedSlots = wanted ? Self.slots(minutes: minutes, weekdays: weekdays, overrides: overrides) : []
@@ -140,9 +149,11 @@ enum PhoneWakeAlarm {
     #if canImport(AlarmKit)
     @available(iOS 26.0, *)
     private static func reconcile(_ slots: [Slot], log: (String) -> Void) async {
+        let defaults = UserDefaults.standard
         let manager = AlarmManager.shared
         guard manager.authorizationState == .authorized else {
-            // Denied (or never granted): nothing can be scheduled, and iOS keeps none of ours either.
+            // Denied (or never granted): nothing can be scheduled, so nothing will ring.
+            defaults.set(false, forKey: armedKey)
             if !slots.isEmpty { log("Phone alarm: NOT set (alarms are not allowed for NOOP in Settings)") }
             return
         }
@@ -150,32 +161,34 @@ enum PhoneWakeAlarm {
         do {
             scheduled = try manager.alarms
         } catch {
+            defaults.set(false, forKey: armedKey)
             log("Phone alarm: could not read the scheduled alarms (\(error.localizedDescription))")
             return
         }
         let wantedByID = Dictionary(slots.map { (alarmID(for: $0), $0) }, uniquingKeysWith: { first, _ in first })
-        var failed = false
+        var cancelFailed = false
         for alarm in scheduled where wantedByID[alarm.id] == nil {
             do {
                 try manager.cancel(id: alarm.id)
             } catch {
-                failed = true
+                cancelFailed = true
                 log("Phone alarm: could not remove an old alarm (\(error.localizedDescription))")
             }
         }
         let have = Set(scheduled.map(\.id))
+        var scheduleFailed = false
         for (id, slot) in wantedByID.sorted(by: { $0.value.minutes < $1.value.minutes }) where !have.contains(id) {
             do {
                 _ = try await manager.schedule(id: id, configuration: configuration(for: slot))
-                UserDefaults.standard.set(true, forKey: scheduledKey)
                 log("Phone alarm: set for \(describe(slot))")
             } catch {
-                failed = true
+                scheduleFailed = true
                 log("Phone alarm: NOT set for \(describe(slot)) (\(error.localizedDescription))")
             }
         }
+        defaults.set(!slots.isEmpty && !scheduleFailed, forKey: armedKey)
         // Nothing of ours left and nothing wanted: back to never touching AlarmKit until switched on again.
-        if slots.isEmpty && !failed { UserDefaults.standard.set(false, forKey: scheduledKey) }
+        if slots.isEmpty && !cancelFailed { defaults.set(false, forKey: scheduledKey) }
     }
 
     @available(iOS 26.0, *)

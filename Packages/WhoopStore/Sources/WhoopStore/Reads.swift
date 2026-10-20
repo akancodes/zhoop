@@ -116,6 +116,23 @@ extension WhoopStore {
         }
     }
 
+    /// `hrFingerprint` for the PPG-derived heart rate (`ppgHrSample`), which `hrSamples` falls back to for
+    /// every second with no measured row.
+    ///
+    /// A cache over what `hrSamples` RETURNS needs both: a WHOOP 5 offload of a PPG-only stretch lands rows
+    /// here and leaves `hrFingerprint` exactly where it was. Same shape and same index walk, so it is as cheap.
+    public func ppgHrFingerprint(deviceId: String, from: Int, to: Int) async throws -> (count: Int, maxTs: Int) {
+        try syncRead { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT COUNT(*) AS c, COALESCE(MAX(ts), 0) AS m FROM ppgHrSample
+                WHERE deviceId = ? AND ts >= ? AND ts <= ?
+                """, arguments: [deviceId, from, to]) else { return (0, 0) }
+            let c: Int = row["c"]
+            let m: Int = row["m"]
+            return (c, m)
+        }
+    }
+
     /// Whether `deviceId` has ANY heart rate in the window, as a scalar EXISTS rather than a row.
     ///
     /// The day-owner resolver asks this once per candidate per day, so a 60-day steps-calibration window

@@ -46,19 +46,24 @@ struct SmartAlarmView: View {
     /// The iPhone alarm switch (fork, `PhoneWakeAlarm`), OFF by default. Persisted under the key the alarm
     /// reads, so `AppModel.applySmartAlarm` and this screen can never hold two answers.
     @AppStorage(PhoneWakeAlarm.enabledKey) private var phoneAlarmOn = false
-    /// The alarm permission as iOS last reported it, nil until read. Read on appear and only with the switch
-    /// on, so a screen visit by someone who never opted in does not touch AlarmKit; re-read on every appear
-    /// because it lives in Settings and can change while NOOP is closed.
+    /// Whether AlarmKit holds every alarm the switch asked for, as the last sync found it. What the screen
+    /// promises from, since a switch that is on can still be refused by iOS or fail to schedule.
+    @AppStorage(PhoneWakeAlarm.armedKey) private var phoneAlarmArmed = false
+    /// The alarm permission as iOS last reported it, nil until read. Read only with the switch on, so a
+    /// screen visit by someone who never opted in does not touch AlarmKit; re-read on appear and on every
+    /// return to the foreground, because it lives in Settings and can change while NOOP is closed.
     @State private var phonePermission: PhoneWakeAlarm.Permission?
+    @Environment(\.scenePhase) private var scenePhase
     /// Shown when the wearer switches the iPhone alarm on but iOS refuses alarms for NOOP.
     @State private var showAlarmsDeniedAlert = false
     #endif
 
-    /// Whether the iPhone alarm will actually ring at the strap alarm's times: switched on, allowed by iOS,
-    /// and riding on a strap alarm that is on. Always false on macOS and before iOS 26.
+    /// Whether the iPhone alarm will actually ring at the strap alarm's times: switched on, riding on a
+    /// strap alarm that is on, and scheduled with AlarmKit as the last sync found it. Always false on macOS
+    /// and before iOS 26.
     private var phoneAlarmWillRing: Bool {
         #if os(iOS)
-        return behavior.smartAlarmEnabled && phoneAlarmOn && phonePermission == .authorized
+        return behavior.smartAlarmEnabled && phoneAlarmOn && phoneAlarmArmed
         #else
         return false
         #endif
@@ -85,6 +90,9 @@ struct SmartAlarmView: View {
         }
         #if os(iOS)
         .onAppear { if phoneAlarmOn { phonePermission = PhoneWakeAlarm.permission } }
+        .onChangeCompat(of: scenePhase) { phase in
+            if phase == .active, phoneAlarmOn { phonePermission = PhoneWakeAlarm.permission }
+        }
         #endif
     }
 
@@ -241,6 +249,10 @@ struct SmartAlarmView: View {
         #if os(iOS)
         if phoneAlarmWillRing {
             return Text("The wake-alarm above buzzes your wrist from the strap's own firmware, and on some straps that buzz is not guaranteed. Your iPhone alarm rings at the same times: iOS sounds it through silent mode and Focus, and you stop it like any iPhone alarm. It rings at the set time and does not watch your sleep. NOOP's phone-based smart wake (light-sleep detection) is available on the Android app.")
+        }
+        if PhoneWakeAlarm.isSupported && phoneAlarmOn && behavior.smartAlarmEnabled {
+            // Switched on, but iOS does not hold the alarm (refused, failed, or not scheduled yet).
+            return Text("The wake-alarm above buzzes your wrist from the strap's own firmware. Your iPhone alarm is switched on, but iOS is not holding it right now, so the phone will not ring. Check that alarms are allowed for NOOP in Settings, and keep your phone's built-in Clock alarm as your backup until it is.")
         }
         if PhoneWakeAlarm.isSupported {
             return Text("The wake-alarm above buzzes your wrist from the strap's own firmware. It can't sound a loud alarm, and the backup notification NOOP schedules at your wake time can be muted by Focus or silent mode. With the strap alarm on, “Ring my iPhone too” above adds a real iPhone alarm at the same times, which sounds through both. Otherwise keep your phone's built-in Clock alarm as your backup. NOOP's phone-based smart wake (light-sleep detection) is available on the Android app.")
