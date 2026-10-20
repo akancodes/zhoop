@@ -258,7 +258,7 @@ struct TestCentreView: View {
 
                 Toggle("Protocol probes", isOn: $puffinExperiments)
                     .toggleStyle(.switch).tint(StrandPalette.accent)
-                Text("Sends experimental protocol queries and records the replies in the strap log.")
+                Text("Sends experimental protocol queries and records replies in the strap log. Also enables the experimental 5/MG strap alarm.")
                     .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
 
                 Divider().overlay(StrandPalette.hairline)
@@ -903,7 +903,7 @@ private struct TestModeRow: View {
     /// The HONEST per-mode captured-day count for a guided row (#965): distinct days THIS mode produced its
     /// own trace on, read from the same shareable log the report exports, so each active mode accumulates
     /// its OWN count instead of every guided row sharing one elapsed-clock number. nil for a toggle mode
-    /// (no "K of N") and when the mode is off. Recomputes with `live.log` (published) so the row updates as
+    /// (no "K of N") and when the mode is off. Recomputes with `live.log`, which the coalesced `logRevision` invalidates (#2547), so the row updates as
     /// new capture days land.
     private var capturedUnits: Int? {
         guard on, case .guided = mode.capture else { return nil }

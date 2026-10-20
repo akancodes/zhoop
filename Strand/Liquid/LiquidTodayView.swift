@@ -15,6 +15,7 @@ import SwiftUI
 import StrandDesign
 import WhoopStore
 import StrandAnalytics
+import WhoopProtocol
 
 struct LiquidTodayView: View {
     @AppStorage(DayCycleMode.storageKey) private var dayCycleModeRaw = DayCycleMode.sleepOnset.rawValue
@@ -87,6 +88,7 @@ struct LiquidTodayView: View {
     // cheap heart-rate fingerprint and memoises, so the widget, this shell and the other Today view all
     // share one computation rather than scoring the day three times.
     @State private var hostedStressHours: [DaytimeStress.HourPoint] = []
+    @State private var hostedStressActivityMaskedHours = 0
 
     // sheets / expanders
     @State private var guideSection: ScoreSection?
@@ -127,6 +129,8 @@ struct LiquidTodayView: View {
     // day navigation (0 = today, 1 = yesterday, …)
     @State private var selectedDayOffset = 0
     @State private var showDayPicker = false
+    @State private var heartRateCardFrame: CGRect = .null
+    private static let daySwipeSpace = "liquidTodayDaySwipeSpace"
 
     // PERF: the body was rescanning repo.days (599 days) ~23× per pass for displayDay and ~3× for
     // readiness on EVERY re-render (every HR notify, every canvas frame that invalidates, every scroll).
@@ -146,6 +150,10 @@ struct LiquidTodayView: View {
     /// the other caches. It composes `TodayView.lastScoredRecoveryDay`, which is O(days) — exactly the scan
     /// this cache exists to keep out of body. Never resolved in body.
     @State private var cachedChargeDisplay: ChargeDisplay = .noData
+    /// Active WHOOP 5 R-R policy bounds for the selected night's missing Charge explanation.
+    @State private var whoop5StrictRR = false
+    @State private var firstRecordedRRDay: String?
+    @State private var firstScorableRRDay: String?
     /// Flips true once the first load() completes. Until then the hero gauges + sky render STATIC so the
     /// launch data-churn (refresh publish + BLE/HR notifies) isn't fighting 4 live canvases + CoreMotion.
     @State private var dataLoaded = false
@@ -228,6 +236,15 @@ struct LiquidTodayView: View {
     /// The Charge hero's resolved state (see `cachedChargeDisplay`), read O(1) from the cache.
     private var chargeDisplay: ChargeDisplay { cachedChargeDisplay }
 
+    /// Match classic Today's existing legacy-night judgement, including its selected-day gate.
+    private var chargeLegacyRRGap: Bool {
+        guard let day = displayDay, day.recovery == nil else { return false }
+        return Whoop5RR.legacyUnscorableNight(
+            strictWhoop5: whoop5StrictRR, day: day.day,
+            firstRecordedDay: firstRecordedRRDay, firstScorableDay: firstScorableRRDay,
+            avgHrv: day.avgHrv, totalSleepMin: day.totalSleepMin)
+    }
+
     /// The actual O(days) resolution. Offset 0 prefers live repo.today; past offsets look up. Run ONCE
     /// per data/day change from load(), never from body.
     private func resolveDisplayDay() -> DailyMetric? {
@@ -268,8 +285,9 @@ struct LiquidTodayView: View {
     /// Horizontal swipe between days (right = older, left = newer — `TodayView.daySwipeDelta`, #2378),
     /// clamped to [today, earliest].
     private var daySwipeGesture: some Gesture {
-        DragGesture(minimumDistance: 24)
+        DragGesture(minimumDistance: 24, coordinateSpace: .named(Self.daySwipeSpace))
             .onEnded { value in
+                guard !heartRateCardFrame.contains(value.startLocation) else { return }
                 let dx = value.translation.width, dy = value.translation.height
                 guard abs(dx) > abs(dy) * 1.5, abs(dx) > 50 else { return }
                 let delta = TodayView.daySwipeDelta(dx: dx)
@@ -348,7 +366,9 @@ struct LiquidTodayView: View {
                     // nothing and keeps its slot in the saved order.
                     ForEach(sectionOrder) { section in
                         switch section {
-                        case .hero: heroCard
+                        case .hero:
+                            heroCard
+                            if chargeLegacyRRGap { ChargeLegacyRRGapNote() }
                         case .liveSession: if liveSessionsBeta { liveSessionStartRow }
                         case .synthesis: synthesisSection
                         case .keyMetrics: keyMetricsSection
@@ -432,6 +452,8 @@ struct LiquidTodayView: View {
             }
             .ignoresSafeArea()
         }
+        .coordinateSpace(name: Self.daySwipeSpace)
+        .onPreferenceChange(LiquidHeartRateCardFrameKey.self) { heartRateCardFrame = $0 }
         // Swipe left/right to change DAYS (WHOOP-style). Tab-swipe is disabled on Today in RootTabView so
         // this owns the horizontal gesture here.
         .simultaneousGesture(daySwipeGesture)
@@ -505,7 +527,10 @@ struct LiquidTodayView: View {
     /// Arm the refresh once the pull passes the threshold; FIRE it when the finger releases (the pull
     /// springs back toward zero). Guarded so it can't double-fire or re-trigger mid-refresh.
     private func handlePull(_ y: CGFloat) {
-        pullY = max(0, y)
+        let nextPullY = max(0, y)
+        // Normal upward scrolling keeps reporting negative offsets. Avoid invalidating the whole
+        // dashboard for every such frame when the visible pull indicator is already at zero.
+        if nextPullY != pullY { pullY = nextPullY }
         guard !refreshing else { return }
         // #1748 twin: gate the ARM, not the release. `syncNow()`'s own gate checks connected + bonded, and
         // `bonded` is set by the live-HR path for a 5/MG that has never completed a handshake — so the pull
@@ -729,6 +754,12 @@ struct LiquidTodayView: View {
             }
             .buttonStyle(LiquidPressStyle())
             .accessibilityHint("Opens the full-day heart rate timeline")
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: LiquidHeartRateCardFrameKey.self,
+                                           value: geometry.frame(in: .named(Self.daySwipeSpace)))
+                }
+            }
         }
     }
 
@@ -816,6 +847,12 @@ struct LiquidTodayView: View {
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .frame(maxWidth: .infinity, minHeight: 60, alignment: .center)
+                    }
+                    if let maskedCaption = stressActivityMaskedHoursCaption(hostedStressActivityMaskedHours) {
+                        Text(maskedCaption)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -1603,6 +1640,7 @@ struct LiquidTodayView: View {
         // readiness verdict. Both scan repo.days (up to 599 rows); doing it per-render was the stutter.
         let day = resolveDisplayDay()
         cachedDisplayDay = day
+        await reloadRRUnitPolicy()
         cachedReadiness = ReadinessEngine.evaluate(days: repo.days, today: day?.day)
         // Prior-day vitals carry, resolved ONCE here (never in body). Bound to today's own key so it can't
         // echo today's still-forming row; only on today (a past day's own row is the whole story).
@@ -1617,8 +1655,8 @@ struct LiquidTodayView: View {
         // classic Today reads, so the two screens agree on when a wearer is genuinely mid-calibration
         // rather than simply lacking a scored night.
         let calNights = (selectedDayOffset == 0)
-            ? RecoveryScorer.calibrationNights(nightlyHrv: repo.days.map(\.avgHrv),
-                                               dayKeys: repo.days.map(\.day),
+            ? RecoveryScorer.calibrationNights(nightlyHrv: repo.chargeBaselines?.hrvHistory.values ?? [],
+                                               dayKeys: repo.chargeBaselines?.hrvHistory.dayKeys ?? [],
                                                hasRecovery: day?.recovery != nil)
             : nil
         let priorScored = TodayView.lastScoredRecoveryDay(
@@ -1660,10 +1698,20 @@ struct LiquidTodayView: View {
             // max, so the stored row simply won) which is why it went unnoticed. 200_000 is what every
             // other whole-window HR consumer already passes.
             let todayHr = await repo.hrSamples(from: from, to: to, limit: 200_000)
-            let maxHR = profile.age > 0 ? StrainScorer.tanakaHRmax(age: Double(profile.age)) : nil
+            // #2460: the manual HR-max override, then Tanaka, exactly as AnalyticsEngine resolves it
+            // for the STORED day. These two numbers meet in `effectiveEffort`, which takes the larger,
+            // so a live value on the formula's yardstick outvoted an override set because the real
+            // maximum is above it. See `ProfileStore.effortHRmax`.
+            let maxHR = profile.effortHRmax
             let restHR = day?.restingHr.map(Double.init) ?? StrainScorer.defaultRestingHR
-            liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
-                                                  method: PuffinExperiment.effortMethod, sex: profile.sex)
+            let method = PuffinExperiment.effortMethod
+            let sex = profile.sex
+            // Fingerprinting and scoring a full day's HR samples is pure work. Keep it off the
+            // main actor so a Repository refresh cannot block an in-progress scroll.
+            liveStrainLocal = await Task.detached(priority: .utility) {
+                StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
+                                    method: method, sex: sex)
+            }.value
         } else {
             liveStrainLocal = nil
         }
@@ -1836,12 +1884,37 @@ struct LiquidTodayView: View {
         }
 
         // #2040: and today's stress, on the same "only when hosted" rule.
-        hostedStressHours = HostedCardPrefs.decodeEnabled(hostedCardsRaw).contains(.stressToday)
-            ? (await StressDayCurve.today(repo: repo)?.result.timeline ?? [])
-            : []
+        if HostedCardPrefs.decodeEnabled(hostedCardsRaw).contains(.stressToday) {
+            let result = await StressDayCurve.today(
+                repo: repo,
+                personalBaseline: PuffinExperiment.stressPersonalBaselineEnabled
+            )?.result
+            hostedStressHours = result?.timeline ?? []
+            hostedStressActivityMaskedHours = result?.activityMaskedHours ?? 0
+        } else {
+            hostedStressHours = []
+            hostedStressActivityMaskedHours = 0
+        }
 
         // First load done — bring the hero gauges + sky to life now the launch churn has settled.
         if !dataLoaded { withAnimation(.easeIn(duration: 0.4)) { dataLoaded = true } }
+    }
+
+    /// Re-read the indexed first-beat bounds on each load, so a new labelled sync clears the note.
+    private func reloadRRUnitPolicy() async {
+        guard let store = await repo.storeHandle() else {
+            whoop5StrictRR = false
+            firstRecordedRRDay = nil
+            firstScorableRRDay = nil
+            return
+        }
+        let owner = repo.deviceId
+        func dayKey(_ ts: Int?) -> String? {
+            ts.map { Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval($0))) }
+        }
+        whoop5StrictRR = (try? await store.isWhoop5RRSource(deviceId: owner)) ?? false
+        firstRecordedRRDay = dayKey((try? await store.firstRecordedRRTimestamp(deviceId: owner)) ?? nil)
+        firstScorableRRDay = dayKey((try? await store.firstScorableWhoop5RRTimestamp(deviceId: owner)) ?? nil)
     }
 
     // MARK: - Derived (sync, off repo.today / repo.days)
@@ -2074,6 +2147,12 @@ struct LiquidTodayView: View {
         return TodayView.carriedCaption(priorDayKey: carried.day,
                                         todayKey: displayDay?.day ?? selectedDayKey)
     }
+}
+
+/// Measures the heart-rate card in the same coordinate space as the day-swipe gesture.
+private struct LiquidHeartRateCardFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .null
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
 }
 
 /// Carries the Today scroll's top overscroll offset up to the view for the custom liquid pull-to-refresh.
@@ -2403,6 +2482,10 @@ private struct LiquidLiveHR: View {
     @EnvironmentObject private var live: LiveState
     @State private var samples: [Double] = []
     @State private var beat = false
+    @State private var scrubX: CGFloat?
+    #if os(iOS)
+    @State private var scrubEngaged = false
+    #endif
     private let maxSamples = 90   // ~1.5 min of 1 Hz live HR, enough to read the shape
 
     private var isLive: Bool { live.connected && samples.count >= 2 }
@@ -2461,13 +2544,30 @@ private struct LiquidLiveHR: View {
             if series.count >= 2 {
                 ZStack {
                     LiquidHeartRateGrid()
+                    // Historical buckets cannot change between live ticks. Do not run the decorative
+                    // trace clock for this fallback; genuine live HR keeps its existing animation.
                     LiquidThread(bpm: series,
                                  segments: isLive ? nil : (fallbackSegments.count == series.count
                                                            ? fallbackSegments : nil),
-                                 tint: tint, height: 92, animated: animated)
+                                 tint: tint, height: 92, animated: animated && isLive)
                 }
                 .frame(height: 92)
                 .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.space2, style: .continuous))
+                .contentShape(Rectangle())
+                .overlay { scrubReadout }
+                .onContinuousHover(coordinateSpace: .local) { phase in
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        switch phase {
+                        case .active(let location): scrubX = location.x
+                        case .ended: scrubX = nil
+                        }
+                    }
+                }
+                #if os(iOS)
+                .gesture(touchScrubGesture)
+                #endif
                 HStack {
                     stat(String(localized: "Min"), series.min())
                     Spacer()
@@ -2503,6 +2603,62 @@ private struct LiquidLiveHR: View {
                 .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textSecondary)
         }
     }
+
+    /// Uses the thread renderer's ten-point inset and equal-distance sample positions, so the
+    /// readout points to the value actually drawn under the finger even for a sparse banked trace.
+    private var scrubReadout: some View {
+        GeometryReader { geometry in
+            if let scrubX, series.count >= 2 {
+                // The renderer's own mapping, not a copy of it: a private inset or span floor here would
+                // agree by inspection and then drift the crosshair off the curve the moment either moved.
+                let plot = LiquidRender.ThreadPlot(size: geometry.size, values: series)
+                let index = plot.nearestIndex(toX: Double(scrubX))
+                let width = geometry.size.width
+                let x = CGFloat(plot.x(index))
+                let y = CGFloat(plot.y(series[index]))
+                Path { path in
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: geometry.size.height))
+                }
+                .stroke(tint, lineWidth: NoopMetrics.hairlineWidth)
+                Circle().fill(tint).frame(width: 8, height: 8).position(x: x, y: y)
+                (Text("\(Int(series[index].rounded()))").font(StrandFont.captionNumber)
+                    + Text(" bpm").font(StrandFont.caption))
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .padding(.horizontal, NoopMetrics.space2)
+                    .padding(.vertical, NoopMetrics.space1)
+                    .background(StrandPalette.surfaceBase.opacity(0.9), in: Capsule())
+                    .position(x: min(max(x, 48), max(48, width - 48)), y: 15)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    #if os(iOS)
+    private var touchScrubGesture: some Gesture {
+        LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+            .onChanged { value in
+                guard case .second(true, let drag) = value else { return }
+                if !scrubEngaged {
+                    scrubEngaged = true
+                    StrandHaptic.selection.play()
+                }
+                if let drag {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { scrubX = drag.location.x }
+                }
+            }
+            .onEnded { _ in
+                scrubEngaged = false
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { scrubX = nil }
+            }
+    }
+    #endif
 }
 
 /// Static technical grid behind the live trace. Canvas draws only when layout/style changes, so the

@@ -5,6 +5,7 @@ import Security
 import WhoopProtocol
 import WhoopStore
 import OuraProtocol
+import StrandAnalytics   // item 27: NightStandDown, the learned night band the all-day HR hold stands down for
 // The live-HR suspend listens for the screen going dark, which is a UIKit notification on iOS and an
 // NSWorkspace one on macOS (see installScreenStateObservers).
 #if os(iOS)
@@ -261,6 +262,13 @@ public final class OuraLiveSource: NSObject, ObservableObject {
     /// SetNotification is the official app's `ff` instead of `3f` (OURA_PROTOCOL.md s2.3). The next
     /// connect re-reads it, so switching the toggle off restores the default with nothing left on the ring.
     private let notifyMaskFull: () -> Bool
+    /// Item 27: the Experimental "Oura ring: all-day heart rate & HRV" toggle, read at every decision so a flip takes
+    /// effect within one re-engage tick / one history-fetch tick, never at the next launch.
+    private let allDayLiveHR: () -> Bool
+    /// Item 27: the learned night band the daytime-HR hold stands down for while the toggle is on; nil at
+    /// cold start (the screen rule then applies as before). Supplied by the app layer from the same sleep
+    /// learner the battery night-guard reads.
+    private let nightBand: () -> NightStandDown.Band?
     private let log: (String) -> Void
     private let onBattery: (Int) -> Void
     /// Fired with the ring's TRUE model label ("Oura Ring 3/4/5") once the GetProductInfo hardware id resolves
@@ -386,7 +394,8 @@ public final class OuraLiveSource: NSObject, ObservableObject {
     /// nap), so this is a COLLECTION, not a single slot: keeping only the latest let a nap's 0x49 clobber
     /// the overnight's before the overnight burst finalized, and the overnight then fell back to its
     /// +4 h write time (2026-07-17 capture). Each burst matches its OWN window by ring-time proximity.
-    /// Bounded (oldest dropped past the cap); reset per session.
+    /// Bounded (oldest dropped past the cap); kept across reconnects, cleared on teardown
+    /// (`clearsSleepWindowStash`).
     private var recentSleepWindows049: [(ringTimestamp: UInt32, startOffMin: Int, endOffMin: Int)] = []
     private static let recentSleepWindows049Cap = 16
 
@@ -736,6 +745,7 @@ public final class OuraLiveSource: NSObject, ObservableObject {
     /// overlaps a fetch already in flight - the driver's own phase is the guard, so this is safe to call
     /// both right after reaching `.streaming` and from the periodic timer).
     private func fetchHistoryIfIdle() {
+        resumeAfterStandDownIfReleased()   // item 27: the one tick that still runs while suspended
         guard let driver, driver.phase == .streaming else { return }
         // Arm the per-drain state: where we sought from (reboot detection), the stored-sample high-water
         // mark the cursor will commit from, and the stall/deadline guards.
@@ -901,6 +911,39 @@ public final class OuraLiveSource: NSObject, ObservableObject {
         batchQuietTimer?.invalidate()
         batchQuietTimer = nil
     }
+    /// Bank an interrupted drain's progress before the link and its anchor go away (#2443).
+    ///
+    /// The resume cursor is committed only when a drain ENDS, so a link that dropped (or a `stop()`)
+    /// partway through threw the drain's progress away: the next connect refetched from the old cursor
+    /// and the ring re-served everything the interrupted drain had already stored. Those copies resolve
+    /// under the NEXT session's SyncTime anchor, so they land a second or two off the first copy and MISS
+    /// `rrInterval`'s `(deviceId, ts, rrMs, seq)` key instead of colliding with it. The beats are stored
+    /// twice, the night's R-R coverage goes above 1, and `sessionAvgHRV` refuses the night. A reported
+    /// night had 1,753 of its 4,346 records served twice.
+    ///
+    /// Commits what the drain did bank, under the same rules `finishDrain` applies to a drain that
+    /// stopped early: forward-only, only when the candidate resolves under the anchor, and through the
+    /// #2097 reboot judge. Nothing new decides the cursor here.
+    ///
+    /// Call AFTER the hypnogram flush, so a burst still assembling banks against the cursor it belongs
+    /// to, and BEFORE `driver?.stop()`, because the commit asks the driver to resolve the candidate ring
+    /// time and a stopped driver has no anchor left to resolve it with.
+    ///
+    /// This NARROWS the window rather than closing the hole: a redrain of an already completed night
+    /// stores the same beats twice by the same route with no cursor involved, so the durable fix is a
+    /// dedup that survives an anchor shift. Tracked on #2443.
+    /// Never makes the #2097 REBOOT judgement. That judgement resets the cursor to 0 and re-pulls the
+    /// ring's whole history, and it declines to trust continuity when this session never adopted an
+    /// anchor, which is the ordinary state of a drain that was cut short before a 0x13 reply resolved.
+    /// Deferring it to a drain that actually finishes costs nothing, because a genuine reboot still
+    /// serves pre-resume data on the next drain; making it here would answer "no evidence" with a full
+    /// re-pull, and by this issue's own mechanism every re-served record would then double-store.
+    private func commitInterruptedDrainCursor() {
+        guard let driver, driver.phase == .fetchingHistory, drain.maxStoredRingTime > 0,
+              !drain.sawPreResumeData else { return }
+        _ = commitResumeCursor(drainCompleted: false)
+    }
+
 
     /// Commit the durable resume cursor at drain end. Only a cursor that (a) moved forward, (b) is below
     /// the plausibility ceiling, and (c) resolves to a real time under the CURRENT anchor is persisted;
@@ -971,6 +1014,30 @@ public final class OuraLiveSource: NSObject, ObservableObject {
             }
         }
         return best
+    }
+
+    /// Where a session ends, for the purpose of the 0x49 stash below.
+    enum SleepWindowStashBoundary: Equatable, Sendable {
+        /// The link dropped or re-formed; the same ring, the same process, the same ring clock.
+        case linkBoundary
+        /// A deliberate teardown (`stop()`: device switch, removal, disable).
+        case teardown
+    }
+
+    /// Whether `recentSleepWindows049` is cleared at `boundary`. Pure, so the policy is tested without a ring.
+    ///
+    /// WHY A RECONNECT MUST KEEP IT (2026-09-21 and 2026-09-24 captures). The ring writes its 0x49 window and
+    /// its SleepNet phase records as two events, seconds apart (12 s on 09-24: 0x49 07:16:23, phase records
+    /// 07:16:35). A history fetch that catches up BETWEEN them delivers the 0x49 on one fetch and the burst
+    /// on the next. On a steady link the next fetch runs on the same connection and pairs normally; when the
+    /// link drops in between (07:28:36 on 09-24), the next fetch runs on a new connection, and clearing the
+    /// stash there left the burst unpaired: it persisted `[no-0x49-onset]` at 22:36:35 and superseded the
+    /// anchored 22:54 row, 16 min before the ring's own onset, which the Oura app showed to the minute.
+    /// Clearing was never what made pairing safe: `closestSleepWindow049` pairs by ring-time proximity
+    /// (10 min), so a window cannot pair with another finalization's burst, and the stash stays capped.
+    /// A teardown still clears it, because the next session may be a different ring on a different clock.
+    nonisolated static func clearsSleepWindowStash(at boundary: SleepWindowStashBoundary) -> Bool {
+        boundary == .teardown
     }
 
     /// Persist a closed hypnogram burst with its RECONSTRUCTED time axis: codes laid backward at the
@@ -1244,10 +1311,43 @@ public final class OuraLiveSource: NSObject, ObservableObject {
     /// exceeds a genuine glance-and-pocket.
     private let liveHRSuspendDelay: TimeInterval = 300
 
-    /// True once the screen has been off long enough that the ring should be left alone. Everything else
-    /// keys off this one predicate, so the suspend and the resume can never disagree about the rule.
+    /// True once the ring should be left alone. Everything else keys off this one predicate — the
+    /// suspend, the resume, and `OuraDriver.liveHRWanted` at auth — so no two gates can disagree.
     private var liveHRSuspended: Bool {
-        Self.shouldSuspendLiveHR(screenOffAt: screenOffAt, now: Date(), delay: liveHRSuspendDelay)
+        Self.shouldSuspendLiveHR(screenOffAt: screenOffAt, now: Date(), delay: liveHRSuspendDelay,
+                                 allDay: allDayPolicyNow())
+    }
+
+    /// Item 27: what the all-day toggle contributes to the stand-down decision, sampled now.
+    private func allDayPolicyNow(_ now: Date = Date()) -> AllDayLiveHR {
+        guard allDayLiveHR() else { return .off }
+        return .on(band: nightBand(), nowSecOfDay: Self.localSecOfDay(now))
+    }
+
+    /// Local time-of-day in seconds [0, 86400), in the CURRENT zone so a traveller's night follows them.
+    nonisolated static func localSecOfDay(_ now: Date) -> Int {
+        let c = Calendar.current.dateComponents([.hour, .minute, .second], from: now)
+        return (c.hour ?? 0) * 3_600 + (c.minute ?? 0) * 60 + (c.second ?? 0)
+    }
+
+    /// Item 27 — the Experimental "Oura ring: all-day heart rate & HRV" toggle as the suspend policy sees it.
+    ///
+    /// WHY. The ring produces daytime HR ONLY while a client holds it in daytime-HR mode; there is no
+    /// banked daytime family it emits on its own. The screen-off suspend was built for the night (holding
+    /// the ring overnight killed its sleep suite, r = −0.93 over 11 nights) but its gate — the screen —
+    /// is also dark for most of a working day, so from the night that build shipped the daytime 5-min HR
+    /// bins fell from 123–144/144 to a median of ~16, and windowed rMSSD by day emptied with them. With
+    /// the toggle ON the stand-down keys on the learned NIGHT band instead: outside it a dark screen no
+    /// longer suspends (the 15 s re-engage keeps the ring in daytime mode and the ring banks `0x80` for
+    /// the 300 s drain, exactly the pre-#1526 daytime behaviour); inside it the screen-off grace applies
+    /// unchanged, so the merged night fix is untouched. The trade — the ring's own daytime PPG costs
+    /// charge — is the user's, which is why this is a default-OFF toggle and not a new default.
+    enum AllDayLiveHR: Equatable {
+        /// Toggle off: the screen rule alone, byte-identical to before this policy existed.
+        case off
+        /// Toggle on. `band` nil = no learned sleep schedule yet (cold start): the screen rule applies
+        /// rather than a made-up clock, and the suspend line says so.
+        case on(band: NightStandDown.Band?, nowSecOfDay: Int)
     }
 
     /// Pure policy so it is testable without a `CBCentralManager` (this class owns one and cannot be built
@@ -1257,9 +1357,16 @@ public final class OuraLiveSource: NSObject, ObservableObject {
     ///   - screenOffAt: when the screen went dark, nil while the user is present.
     ///   - now: the clock, injected so a test need not sleep for the grace window.
     ///   - delay: the grace window.
-    nonisolated static func shouldSuspendLiveHR(screenOffAt: Date?, now: Date, delay: TimeInterval) -> Bool {
-        guard let off = screenOffAt else { return false }
-        return now.timeIntervalSince(off) >= delay
+    ///   - allDay: the all-day toggle's contribution; `.off` is the pre-item-27 rule exactly.
+    nonisolated static func shouldSuspendLiveHR(screenOffAt: Date?, now: Date, delay: TimeInterval,
+                                                allDay: AllDayLiveHR = .off) -> Bool {
+        guard let off = screenOffAt, now.timeIntervalSince(off) >= delay else { return false }
+        switch allDay {
+        case .off: return true
+        case .on(let band, let secOfDay):
+            guard let band else { return true }   // cold start: no learned night, keep the screen rule
+            return NightStandDown.contains(band, secOfDay: secOfDay)
+        }
     }
 
     /// What `screenOffAt` must be at construction time, given whether the screen is ALREADY dark.
@@ -1326,6 +1433,8 @@ public final class OuraLiveSource: NSObject, ObservableObject {
                 authKey: @escaping () -> Data?,
                 persist: @escaping (Streams) -> Void = { _ in },
                 persistSleepSession: @escaping (CachedSleepSession) -> Void = { _ in },
+                allDayLiveHR: @escaping () -> Bool = { false },
+                nightBand: @escaping () -> NightStandDown.Band? = { nil },
                 log: @escaping (String) -> Void = { _ in },
                 onBattery: @escaping (Int) -> Void = { _ in },
                 onModel: @escaping (String) -> Void = { _ in },
@@ -1340,6 +1449,8 @@ public final class OuraLiveSource: NSObject, ObservableObject {
         self.authKey = authKey
         self.persist = persist
         self.persistSleepSession = persistSleepSession
+        self.allDayLiveHR = allDayLiveHR
+        self.nightBand = nightBand
         self.log = log
         self.onBattery = onBattery
         self.onModel = onModel
@@ -1616,6 +1727,7 @@ public final class OuraLiveSource: NSObject, ObservableObject {
         }
         drainPendingAnchorEvents()
         dropUnanchoredHypnogramBursts()   // never wall-clock a night's time axis; they re-arrive next drain
+        commitInterruptedDrainCursor()    // #2443: bank the drain's progress before the anchor goes
         driver?.stop()
         driver = nil
         reassembler.reset()
@@ -1633,7 +1745,7 @@ public final class OuraLiveSource: NSObject, ObservableObject {
         loggedProductInfo.removeAll()
         greenIbiAmpCount = 0
         greenIbiAmpLengths.removeAll()
-        recentSleepWindows049.removeAll()
+        if Self.clearsSleepWindowStash(at: .teardown) { recentSleepWindows049.removeAll() }
         recentPersistedSessionWindows.removeAll()
         activityMETByDay.removeAll()
         activityCadenceObs.removeAll()
@@ -2556,8 +2668,50 @@ public final class OuraLiveSource: NSObject, ObservableObject {
     private func logLiveHRSuspendOnce() {
         guard !loggedLiveHRSuspend else { return }
         loggedLiveHRSuspend = true
-        log("Oura: live-HR re-engage SUSPENDED - screen off \(Int(liveHRSuspendDelay / 60)) min, leaving the "
+        let why: String
+        switch allDayPolicyNow() {
+        case .off: why = ""
+        case .on(let band, _):
+            why = band.map { " inside the night stand-down \(NightStandDown.describe($0)) (all-day HR on)" }
+                ?? " (all-day HR on, but no learned sleep schedule yet - screen rule applies)"
+        }
+        log("Oura: live-HR re-engage SUSPENDED - screen off \(Int(liveHRSuspendDelay / 60)) min\(why), leaving the "
             + "ring free to run its own night suite (history fetch continues every \(Int(historyFetchInterval))s)")
+    }
+
+    /// Item 27: the stand-down ended while the screen stayed dark — the learned night band closed (or the
+    /// toggle was flipped on during the day). The screen-on path re-arms via `handleScreenCameBack`; with
+    /// nothing touching the phone, the ONLY tick still running while suspended is the 300 s history fetch,
+    /// so that is where this is checked (the re-engage timer was stopped by the suspend and cannot notice
+    /// its own release). Mirrors the screen-on resume minus clearing `screenOffAt`: the screen IS still
+    /// off, and the next band entry must find the clock already past the grace.
+    ///
+    /// The line is always-on: this is the one path where a wrong band would hold the ring all night, so
+    /// the log names the band and the local time it fired at (a resume stamped INSIDE its own band is the
+    /// defect, readable without Test Centre), and says whether it re-armed the hold now or left it to the
+    /// next `.streaming` — it does not claim a re-arm it did not make.
+    private func resumeAfterStandDownIfReleased() {
+        guard loggedLiveHRSuspend, reengageTimer == nil, !liveHRSuspended else { return }
+        loggedLiveHRSuspend = false
+        loggedUnexpectedLiveHRWhileSuspended = false
+        let now = Date()
+        let at = NightStandDown.describeSecOfDay(Self.localSecOfDay(now))
+        let why: String
+        switch allDayPolicyNow(now) {
+        case .off: why = "all-day HR turned off"
+        case .on(let band, _):
+            why = band.map { "night stand-down \(NightStandDown.describe($0)) ended at \(at) (all-day HR on)" }
+                ?? "no learned sleep schedule at \(at) (all-day HR on)"
+        }
+        guard reachedStreaming, driver != nil else {
+            log("Oura: live-HR re-engage RESUMED - \(why), screen still off; no live link, the next "
+                + "connect arms it")
+            return
+        }
+        log("Oura: live-HR re-engage RESUMED - \(why), screen still off; re-arming the hold now")
+        lastLivePulseAt = now   // same watchdog re-stamp as the screen-on resume
+        startReengageTimer()
+        reengageLiveHR()
     }
 
     /// Actively turn daytime-HR mode off rather than merely declining to re-arm it. `reengageLiveHR`'s own
@@ -2845,7 +2999,8 @@ extension OuraLiveSource: @preconcurrency CBCentralManagerDelegate {
         loggedProductInfo.removeAll()
         greenIbiAmpCount = 0
         greenIbiAmpLengths.removeAll()
-        recentSleepWindows049.removeAll()
+        // Kept across the reconnect: the burst that pairs with a stashed 0x49 can arrive on this link.
+        if Self.clearsSleepWindowStash(at: .linkBoundary) { recentSleepWindows049.removeAll() }
         recentPersistedSessionWindows.removeAll()
         pendingAnchorEvents.removeAll()   // a fresh session must never replay a stale-anchor guess
         hypnogramAssembler.reset()        // ditto for a half-accumulated burst from a dead session
@@ -2921,6 +3076,7 @@ extension OuraLiveSource: @preconcurrency CBCentralManagerDelegate {
         }
         drainPendingAnchorEvents()
         dropUnanchoredHypnogramBursts()   // never wall-clock a night's time axis; they re-arrive next drain
+        commitInterruptedDrainCursor()    // #2443: bank the drain's progress before the anchor goes
         driver?.stop()
         driver = nil
         clearAuthWatchdog()   // a link that drops mid-handshake takes this path, never the escalation
@@ -2941,7 +3097,8 @@ extension OuraLiveSource: @preconcurrency CBCentralManagerDelegate {
         loggedProductInfo.removeAll()
         greenIbiAmpCount = 0
         greenIbiAmpLengths.removeAll()
-        recentSleepWindows049.removeAll()
+        // Kept across the drop: the next link's fetch may carry the burst this 0x49 belongs to.
+        if Self.clearsSleepWindowStash(at: .linkBoundary) { recentSleepWindows049.removeAll() }
         recentPersistedSessionWindows.removeAll()
         activityMETByDay.removeAll()
         activityCadenceObs.removeAll()
@@ -3254,8 +3411,26 @@ extension OuraLiveSource: @preconcurrency CBPeripheralDelegate {
                 // driver goes straight to `.streaming` with no daytime-HR write; the log says which.
                 let wanted = !liveHRSuspended
                 driver?.liveHRWanted = wanted
-                log(wanted ? "Oura: auth OK - enabling live HR"
-                           : "Oura: auth OK - live HR suspended (screen off), daytime HR left untouched")
+                // Item 27: say which policy decided, on BOTH outcomes. With the toggle off the line is the
+                // pre-item-27 text byte for byte; with it on, an enabling connect names the band and which
+                // side of it the clock is on, so a day of "enabling live HR" with no SUSPENDED line reads as
+                // the band excluding the day rather than as a screen that never went dark (the 09-17 16:11
+                // read-out had to infer that from the 5 min grace — the toggle's state was in no line).
+                var inBand = ""
+                var policy = ""
+                switch allDayPolicyNow() {
+                case .off:
+                    break
+                case .on(let band?, let sec):
+                    let span = NightStandDown.describe(band)
+                    inBand = ", night stand-down \(span)"
+                    let side = NightStandDown.contains(band, secOfDay: sec) ? "inside" : "outside"
+                    policy = " (all-day HR on, \(side) night stand-down \(span))"
+                case .on(nil, _):
+                    policy = " (all-day HR on, no learned sleep schedule yet - screen rule applies)"
+                }
+                log(wanted ? "Oura: auth OK - enabling live HR\(policy)"
+                           : "Oura: auth OK - live HR suspended (screen off\(inBand)), daytime HR left untouched")
             } else {
                 log("Oura: WARNING auth status \(status.rawValue)")
             }

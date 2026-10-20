@@ -55,6 +55,7 @@ struct SettingsView: View {
     /// as a "strap estimate (unverified)" fallback when no calibrated `spo2Pct` exists. Display-only —
     /// writes nothing to the strap. See [PuffinExperiment.spo2CandidateDisplayKey].
     @AppStorage(PuffinExperiment.spo2CandidateDisplayKey) private var spo2CandidateDisplayEnabled = false
+    @AppStorage(AppModel.ouraAllDayLiveHRKey) private var ouraAllDayLiveHREnabled = false   // item 27
 
     /// #1545 opt-in: score Effort with Banister's exponential TRIMP instead of Edwards' heart-rate zones.
     /// Default OFF — it re-scores the whole window against a different recipe. See
@@ -120,6 +121,7 @@ struct SettingsView: View {
     @AppStorage(UnitPrefs.liveActivityKey) private var liveActivityEnabled = true
     // Strap-sync Live Activity, iOS only. Separate from the live-HR one on purpose. Default on.
     @AppStorage(UnitPrefs.syncLiveActivityKey) private var syncLiveActivityEnabled = true
+    @AppStorage(UnitPrefs.liftLiveActivityKey) private var liftLiveActivityEnabled = true
     @AppStorage(DayCycleMode.storageKey) private var dayCycleModeRaw = DayCycleMode.sleepOnset.rawValue
     // Alternate app icon (iOS only) — false = Titanium (primary AppIcon), true = Blue Titanium
     // ("AppIcon-Navy"). Display-only preference; the live switch goes through setAlternateIconName.
@@ -263,6 +265,9 @@ struct SettingsView: View {
                 unitsCard.staggeredAppear(index: 1)
                 appearanceCard.staggeredAppear(index: 2)
                 strapCard.staggeredAppear(index: 3)
+                #if os(iOS)
+                liveNotificationsCard.staggeredAppear(index: 3)
+                #endif
                 streakCard.staggeredAppear(index: 4)
                 featuresCard.staggeredAppear(index: 5)
                 #if os(iOS)
@@ -1461,36 +1466,6 @@ struct SettingsView: View {
                     strapNameControl
                 }
 
-                #if os(iOS)
-                rowDivider
-                // MARK: Live Activity — show live HR on the Lock Screen + Dynamic Island (#336).
-                Toggle(isOn: $liveActivityEnabled) {
-                    Text("Live heart rate in Dynamic Island")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                }
-                .toggleStyle(.switch)
-                .tint(StrandPalette.accent)
-                Text("Shows your live heart rate on the Lock Screen and in the Dynamic Island while the strap is connected. Turn it off to keep your live HR out of the Dynamic Island. (Any one already showing clears within a moment.)")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                rowDivider
-                // MARK: Strap-sync Live Activity — its own switch, independent of the live-HR one.
-                Toggle(isOn: $syncLiveActivityEnabled) {
-                    Text("Strap sync in Dynamic Island")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                }
-                .toggleStyle(.switch)
-                .tint(StrandPalette.accent)
-                .accessibilityHint("Shows sync progress on the Lock Screen and in the Dynamic Island")
-                Text("Shows Connecting… / Syncing… with the chunk count and elapsed time while NOOP pulls history from your strap, including a sync started by the Sync Strap shortcut. Independent of the live heart rate switch above.")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                #endif
             }
         }
     }
@@ -1583,6 +1558,48 @@ struct SettingsView: View {
     /// or an early reading that anchored too high). It writes now (epoch SECONDS) to BOTH the
     /// `noop.hrvBaselineEpoch` and `noop.recoveryBaselineEpoch` settings the recovery engine reads, then
     /// kicks a recompute the same way the sleep-edit path does (analyzeRecent → refresh). History stays.
+    #if os(iOS)
+    /// NOOP's live notifications — its Live Activities, on the Lock Screen and in the Dynamic Island — one switch
+    /// each: the live heart rate, a Lift Log session, a strap sync. These three are every Live Activity the app has.
+    /// A switch only decides whether its notification is SHOWN: the heart rate is still measured, recorded and
+    /// scored, a session still runs and buzzes, a sync still runs, with any of them off.
+    private var liveNotificationsCard: some View {
+        SettingsSection(
+            icon: "bell.badge",
+            title: "Live notifications",
+            blurb: "Shown on the Lock Screen and in the Dynamic Island. A switch only hides one: NOOP still measures and records everything."
+        ) {
+            VStack(alignment: .leading, spacing: NoopMetrics.rowSpacing) {
+                liveNotificationSwitch("Live heart rate", isOn: $liveActivityEnabled,
+                                       detail: "While the strap is connected.")
+                rowDivider
+                liveNotificationSwitch("Lift Log session", isOn: $liftLiveActivityEnabled,
+                                       detail: "Your set, rest and heart rate, and the Lock Screen light-up on a double-tap.")
+                rowDivider
+                liveNotificationSwitch("Strap sync", isOn: $syncLiveActivityEnabled,
+                                       detail: "Progress while NOOP pulls history from the strap.")
+            }
+        }
+    }
+
+    private func liveNotificationSwitch(_ title: LocalizedStringKey, isOn: Binding<Bool>,
+                                        detail: LocalizedStringKey) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+            Toggle(isOn: isOn) {
+                Text(title)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textPrimary)
+            }
+            .toggleStyle(.switch)
+            .tint(StrandPalette.accent)
+            Text(detail)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+    #endif
+
     private var recoveryCard: some View {
         SettingsSection(
             icon: "heart.text.square",
@@ -1650,7 +1667,7 @@ struct SettingsView: View {
     // MARK: - Features (opt-in trackers)
 
     /// Opt-in, manual-first feature toggles (default OFF). Hydration tracking gates the water-log card on
-    /// the Today dashboard and its detail screen — nothing is shown or stored until it's enabled.
+    /// the Today dashboard and its detail screen, plus Apple Health water imports on iOS.
     private var featuresCard: some View {
         SettingsSection(
             icon: "drop.fill",
@@ -1667,10 +1684,17 @@ struct SettingsView: View {
                 .tint(StrandPalette.accent)
                 .accessibilityHint("Adds a water-log card to your dashboard")
 
-                Text("Adds a simple fluid log with a daily goal that adjusts to your effort. Tap to add a sip, cup or bottle and watch a progress ring fill. On \(Platform.deviceNounPhrase) only. Nothing is synced.")
+                Text("Adds a fluid log and an effort-adjusted daily goal. Log a sip, cup or bottle to fill your progress ring. Data stays on this device.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                #if os(iOS)
+                Text("Also imports water from Apple Health when connected and allowed to read water data. Drinks logged in NOOP are not written to Apple Health.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                #endif
 
                 rowDivider
 
@@ -1684,6 +1708,11 @@ struct SettingsView: View {
                 .accessibilityHint("Offers to save a workout when it spots sustained elevated heart rate")
 
                 Text("After a sync, NOOP looks over your recent heart rate for a sustained, raised stretch that looks like exercise and offers to save it. It only ever suggests. Nothing is saved until you tap Save, and you can dismiss any suggestion. Turning this off stops future suggestions but keeps your existing workout history. Deliberately conservative, so the odd workout may be missed. On \(Platform.deviceNounPhrase) only.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("Skips sessions that overlap a saved or imported workout, including workouts from Apple Health.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1837,6 +1866,7 @@ struct SettingsView: View {
         // WHOOP 5/MG protocol research now lives in Test Centre. Everyday Settings no longer carries
         // a second copy; the persisted keys and reversible disable actions remain unchanged there.
         if showFiveMGControls || model.repo.activeDeviceIsOura { spo2CandidateCard }
+        if model.repo.activeDeviceIsOura { ouraAllDayLiveHRCard }   // item 27
         sleepStagingCard
         rawSensorDiagnosticsCard
     }
@@ -1964,6 +1994,32 @@ struct SettingsView: View {
                     Task { await model.intelligence.analyzeRecent(); await model.repo.refresh() }
                 }
                 Text("Your WHOOP 5.0/MG sends a strap-computed SpO₂ percentage (the @82 candidate byte) every second — an 8-night independent validation tracked it at corr +0.99 against the WHOOP app, but two nights on the original test device moved the OPPOSITE direction, so device/firmware variance is unresolved. An Oura ring's own SpO₂ reading runs high on the wire (over 100% on a fifth to a half of samples on a clean night); this instead surfaces the ring's mean with each sample capped at 100% first, which has matched the Oura app's own displayed value on every full night checked against it so far, though only a few nights. Turning this on surfaces whichever applies to your device as \"strap estimate (unverified)\" in the Blood Oxygen tile when no calibrated import exists. It never feeds recovery or illness scoring. WHOOP 4.0 has no @82 stream, so this does nothing there.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Item 27: keep the Oura ring in daytime-HR mode while the screen is off during the DAY. The ring
+    /// produces daytime heart rate (and the beats behind windowed rMSSD) only while a client holds that
+    /// mode, so the screen-keyed suspend that protects the night suite also empties a pocketed-phone day.
+    /// ON stands the hold down only for the learned night band; OFF is today's behaviour. Oura-only.
+    private var ouraAllDayLiveHRCard: some View {
+        SettingsSection(
+            icon: "waveform.path.ecg",
+            title: "Experimental · Oura ring all-day heart rate",
+            blurb: "Oura ring only. Keeps your ring measuring heart rate through the day, standing it down only for your night. A WHOOP strap is not affected."
+        ) {
+            VStack(alignment: .leading, spacing: NoopMetrics.rowSpacing) {
+                Toggle(isOn: $ouraAllDayLiveHREnabled) {
+                    Text("Oura ring: all-day heart rate & HRV")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                .toggleStyle(.switch)
+                .tint(StrandPalette.accent)
+                Text("Your Oura ring only measures daytime heart rate while NOOP keeps it in that mode, and NOOP stops asking whenever the screen has been off for five minutes — which protects the ring's own sleep tracking at night, but also leaves a pocketed phone's day blank on the Heart Rate and HRV charts. On, NOOP keeps asking through the day and stops only for your usual night, learned from your sleep history (an hour before your typical bedtime to an hour after your usual wake), so the night is unchanged. Costs ring battery: the ring runs its own optical sensor all day. Until enough nights are learned it behaves as if off. Off by default.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -1,8 +1,8 @@
 name: TestFlight status
 
-# Reads what App Store Connect has for Zhoop: the newest builds and their TestFlight state, the app's groups, the
+# Reads what App Store Connect has for this app (dev.akan.zhoop.noop): the newest builds and their TestFlight state, the app's groups, the
 # builds each group holds and its testers. With "invite" ticked it first sends the TestFlight invitation email
-# again to the testers named below; with "reinvite" it takes them off Zhoop (only), puts them back in the group
+# again to the testers named below; with "reinvite" it takes them off this app (only), puts them back in the group
 # and invites them afresh. It changes nothing else.
 
 on:
@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
       reinvite:
-        description: Take the testers off Zhoop, put them back in the group and invite them afresh
+        description: Take the testers off this app, put them back in the group and invite them afresh
         type: boolean
         default: false
       add:

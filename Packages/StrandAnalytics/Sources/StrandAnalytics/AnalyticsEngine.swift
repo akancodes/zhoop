@@ -18,23 +18,32 @@ public enum AnalyticsEngine {
     /// Pair the strap's WRIST_OFF/WRIST_ON events into off-wrist `[start, end)` intervals for the sleep
     /// detector's fractional wear filter (#500; design credited to j0b-dev's #504). Each WRIST_OFF opens
     /// an interval that closes at the next WRIST_ON, or at `windowEnd` if the strap is still off at the
-    /// end of the read window. Events need not be pre-sorted; kinds are formatted "NAME(n)" (e.g.
+    /// end of the read window. An unmatched tail may end earlier when sustained valid HR resumes;
+    /// explicit OFF/ON pairs are never shortened. Events need not be pre-sorted; kinds are formatted "NAME(n)" (e.g.
     /// "WRIST_OFF(10)"), matched by prefix. Repeated OFFs/ONs without a partner are coalesced.
-    public static func offWristIntervals(events: [WhoopEvent], windowEnd: Int) -> [(start: Int, end: Int)] {
+    /// Kotlin twin: `AnalyticsEngine.offWristIntervals`.
+    public static func offWristIntervals(events: [WhoopEvent], windowEnd: Int,
+                                         hr: [HRSample] = []) -> [(start: Int, end: Int)] {
         let wear = events
             .filter { $0.kind.hasPrefix("WRIST_OFF") || $0.kind.hasPrefix("WRIST_ON") }
             .sorted { $0.ts < $1.ts }
         var intervals: [(start: Int, end: Int)] = []
         var offStart: Int? = nil
-        for e in wear {
+        var lastOff: Int? = nil
+        for e in wear where e.ts <= windowEnd {
             if e.kind.hasPrefix("WRIST_OFF") {
-                if offStart == nil { offStart = e.ts }            // ignore repeated OFFs
+                if offStart == nil { offStart = e.ts }
+                lastOff = e.ts // a repeated OFF invalidates evidence before it
             } else {                                              // WRIST_ON closes an open off-wrist span
                 if let s = offStart, e.ts > s { intervals.append((start: s, end: e.ts)) }
                 offStart = nil
             }
         }
-        if let s = offStart, windowEnd > s { intervals.append((start: s, end: windowEnd)) }
+        if let s = offStart, windowEnd > s {
+            let end = WristWearRecovery.firstSustainedHR(hr, after: lastOff ?? s, before: windowEnd)
+                ?? windowEnd
+            if end > s { intervals.append((start: s, end: end)) }
+        }
         return intervals
     }
 
@@ -705,15 +714,13 @@ public enum AnalyticsEngine {
         // call site" a scattered filter invites.
         let physiologyOnly = matched.filter { !$0.hrOnly }
         let physiologySessions = physiologyOnly.isEmpty ? matched : physiologyOnly
-        // Resting Heart Rate: Use PrimarySessionRestingHR (arithmetic sample mean of the longest/primary
-        // sleep session, #1169), eliminating daytime nap floor distortion.
-        // #804: Preserve ring/device-provided resting HR when present in `providedSleep`.
-        // Cleanly falls back to physiologySessions.compactMap { $0.restingHR }.min() when coverage is sparse.
-        let providedPrimaryRHR = physiologySessions.max(by: { ($0.end - $0.start) < ($1.end - $1.start) })
+        // #2522: use the gated lowest five-minute bin from the primary session, not its whole-session
+        // mean. Choosing the session first preserves #2358's nap protection; a shorter nap must not
+        // supply the daily RHR when the main night has no HR. #804's device-provided value still wins.
+        let primarySession = physiologySessions.max(by: { ($0.end - $0.start) < ($1.end - $1.start) })
+        let providedPrimaryRHR = primarySession
             .flatMap { p in providedSleep.first(where: { $0.start == p.start && $0.end == p.end })?.restingHR }
-        let restingHRDaily: Int? = providedPrimaryRHR
-            ?? primarySessionRestingHR(sessions: physiologySessions, hr: hr).map { Int($0.rounded()) }
-            ?? physiologySessions.compactMap { $0.restingHR }.min()
+        let restingHRDaily: Int? = providedPrimaryRHR ?? primarySession?.restingHR
         // Daily avg HRV = in-bed-weighted mean of per-session avg HRV.
         let avgHRVDaily: Double? = {
             if deepHrvWindow {
@@ -918,6 +925,28 @@ public enum AnalyticsEngine {
         let strain = StrainScorer.strain(dayHr ?? hr, maxHR: effMaxHR, restingHR: restForStrain,
                                          method: effortMethod, sex: profile.sex,
                                          diag: strainDiag, day: day)
+        // #2438 step 0 asks two things of a contributed log: whether the day was scored against the
+        // user's own setting or against the age formula, and how far the day's own heart rate ran above
+        // that. The `effort score` line above answers neither — it collapses override and Tanaka into
+        // one word, and never reports what the day reached. The branch is only visible HERE, because
+        // `strain` is handed an HRmax with its provenance already gone. Built only when a sink is
+        // attached, and it changes no score.
+        if let strainDiag {
+            let hrForPeak = dayHr ?? hr
+            strainDiag(StrainScorer.dayCalibrationLine(
+                // The value the day was actually scored against, which for an age-less profile is the
+                // one `strain` substitutes internally rather than nil. Reporting nil there would put
+                // this line in direct contradiction with the `effort score` line above it, which prints
+                // that substituted number, about the same day.
+                day: day, hrmax: effMaxHR ?? Double(StrainScorer.defaultMaxHR()),
+                hrmaxSource: maxHROverride != nil ? "override" : (profile.age > 0 ? "tanaka" : "default"),
+                tanaka: profile.age > 0 ? StrainScorer.tanakaHRmax(age: profile.age) : nil,
+                observedPeak: hrForPeak.max(by: { $0.bpm < $1.bpm }).map { Double($0.bpm) },
+                restingHR: restForStrain)
+                // The raw peak is usually one isolated sample on a ring; this is the value held (#2438).
+                + StrainScorer.sustainedPeakField(StrainScorer.sustainedPeak(hrForPeak))
+                + StrainScorer.sustainedPeakSpanField(StrainScorer.sustainedPeakSpan(hrForPeak)))
+        }
 
         // ── Workouts ──────────────────────────────────────────────────────────
         // Detect over the full CALENDAR day (dayHr/dayGravity) when the caller supplies it, so a

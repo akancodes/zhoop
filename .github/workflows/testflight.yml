@@ -1,7 +1,8 @@
 name: TestFlight
 
-# Zhoop on Bayram's iPhone through the AKES team's TestFlight: internal testing only, never submitted for review,
-# never public. A pull request registers the App IDs and compiles the app for the simulator, unsigned; a push to
+# NOOP (this fork, see FORK.md) on Bayram's iPhone through the AKES team's TestFlight: internal testing only, never
+# submitted for review, never public. The bundle id keeps the dev.akan.zhoop prefix on purpose: the App Store Connect
+# app (named "Zhoop") and the app's data on his phone are tied to it. A pull request registers the App IDs and compiles the app for the simulator, unsigned; a push to
 # main (or a manual run) archives it with Xcode's cloud-managed signing through the App Store Connect API key,
 # uploads it, and waits until TestFlight has processed it.
 #
