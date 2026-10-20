@@ -55,6 +55,8 @@
 	<string>public.app-category.healthcare-fitness</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSAlarmKitUsageDescription</key>
+	<string>NOOP sets an iPhone alarm at your strap alarm's wake times, only when you turn on Ring my iPhone too on the Alarms screen.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

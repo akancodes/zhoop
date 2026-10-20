@@ -776,8 +776,74 @@ public enum Calories {
                                          profile: UserProfile,
                                          hrmax: Double?,
                                          restingHR: Double?) -> DayEnergyEstimate {
+        // One walk serves this total and `activeEnergyBuckets`, so a day split into pieces can never
+        // disagree with the day. The walk credits in the order the loop that used to live here summed
+        // in, so the total is unchanged to the last bit.
+        var activeKcal = 0.0
+        let resting = walkDayEnergy(hrSamples, profile: profile, hrmax: hrmax,
+                                    restingHR: restingHR) { _, kcal in activeKcal += kcal }
+        return DayEnergyEstimate(restingKcal: resting.restingKcal, activeKcal: activeKcal,
+                                 observedSeconds: resting.observedSeconds)
+    }
+
+    /// Backward-compatible total-kcal facade for the stored daily metric.
+    public static func estimateDayCalories(_ hrSamples: [HRSample],
+                                           profile: UserProfile,
+                                           hrmax: Double?,
+                                           restingHR: Double?) -> Double {
+        estimateDayEnergy(hrSamples, profile: profile, hrmax: hrmax,
+                          restingHR: restingHR).totalKcal
+    }
+
+    /// The day's ACTIVE energy (the `activeKcal` of `estimateDayEnergy`) split into fixed time buckets.
+    ///
+    /// For a writer that needs the day in pieces rather than as one figure: the iOS Apple Health export
+    /// writes it hour by hour, so that a day total read back out of Health adds up to this estimate.
+    /// Each sample's energy goes to the bucket its own timestamp falls in, taken from the very walk
+    /// `estimateDayEnergy` sums, so the buckets add up to that estimate's `activeKcal` (to floating-point
+    /// summation order) rather than to a second estimate of the same day.
+    ///
+    /// Buckets start at `origin + k * bucketSeconds` and are keyed by that start. A bucket that earned
+    /// nothing is absent, not zero.
+    ///
+    /// `excluding` drops the energy of the samples whose timestamp falls in one of the ranges, for windows
+    /// whose energy is reported some other way (a workout that carries its own). The excluded samples
+    /// still set the inferred cadence and their neighbours' carries, exactly as in the whole-day
+    /// estimate, so excluding a window takes out that window's energy and nothing else.
+    public static func activeEnergyBuckets(_ hrSamples: [HRSample],
+                                           profile: UserProfile,
+                                           hrmax: Double?,
+                                           restingHR: Double?,
+                                           origin: Int,
+                                           bucketSeconds: Int,
+                                           excluding: [Range<Int>] = []) -> [Int: Double] {
+        guard bucketSeconds > 0 else { return [:] }
+        var buckets: [Int: Double] = [:]
+        _ = walkDayEnergy(hrSamples, profile: profile, hrmax: hrmax, restingHR: restingHR) { ts, kcal in
+            guard kcal > 0, !excluding.contains(where: { $0.contains(ts) }) else { return }
+            // Floor division, so a sample before `origin` lands in the bucket before it instead of being
+            // folded into the first one.
+            let offset = ts - origin
+            let index = offset >= 0 ? offset / bucketSeconds
+                                    : -((bucketSeconds - 1 - offset) / bucketSeconds)
+            buckets[origin + index * bucketSeconds, default: 0] += kcal
+        }
+        return buckets
+    }
+
+    /// The per-sample walk behind `estimateDayEnergy` and `activeEnergyBuckets`.
+    ///
+    /// Hands each sample's ACTIVE energy to `credit`, with the sample's own timestamp, in the order the
+    /// day total sums it, and returns the resting half. Everything `estimateDayEnergy` documents (the 50%
+    /// HRR gate, the inferred cadence, the capped carries, the tie order) happens here.
+    private static func walkDayEnergy(_ hrSamples: [HRSample],
+                                      profile: UserProfile,
+                                      hrmax: Double?,
+                                      restingHR: Double?,
+                                      credit: (_ ts: Int, _ kcal: Double) -> Void)
+        -> (restingKcal: Double, observedSeconds: Double) {
         if hrSamples.isEmpty {
-            return DayEnergyEstimate(restingKcal: 0, activeKcal: 0, observedSeconds: 0)
+            return (restingKcal: 0, observedSeconds: 0)
         }
 
         let weightKg = profile.weightKg > 0 ? profile.weightKg : 70.0
@@ -820,7 +886,6 @@ public enum Calories {
         })
         let restingKcal = restingRate * observedSeconds
 
-        var activeKcal = 0.0
         for i in ordered.indices {
             let durationS: Double
             // Active carry is capped at the INFERRED CADENCE, not at the wider resting cap. A 30 s
@@ -839,18 +904,8 @@ public enum Calories {
             guard bpm >= activeThreshold else { continue }
             let grossRate = activeKcalPerS(coeffs, hr: bpm, hrmax: effHRmax,
                                            weightKg: weightKg, age: age, vo2max: vo2max)
-            activeKcal += max(0.0, grossRate - restingRate) * durationS
+            credit(ordered[i].ts, max(0.0, grossRate - restingRate) * durationS)
         }
-        return DayEnergyEstimate(restingKcal: restingKcal, activeKcal: activeKcal,
-                                 observedSeconds: observedSeconds)
-    }
-
-    /// Backward-compatible total-kcal facade for the stored daily metric.
-    public static func estimateDayCalories(_ hrSamples: [HRSample],
-                                           profile: UserProfile,
-                                           hrmax: Double?,
-                                           restingHR: Double?) -> Double {
-        estimateDayEnergy(hrSamples, profile: profile, hrmax: hrmax,
-                          restingHR: restingHR).totalKcal
+        return (restingKcal: restingKcal, observedSeconds: observedSeconds)
     }
 }

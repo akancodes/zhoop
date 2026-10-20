@@ -73,11 +73,15 @@ final class HealthKitBridge: ObservableObject {
     /// `writeBack` must read this, not the raw import id: a Bluetooth-only WHOOP user has no imported
     /// `noopDeviceId` daily row, so those metrics exist ONLY here.
     private var computedDeviceId: String { noopDeviceId + "-noop" }
+    /// The wearer's body numbers and HRmax, for the strap energy write (`writeActiveEnergy`), which has to
+    /// feed the estimator what the analytics engine fed it for the same day.
+    private let profile: ProfileStore
 
-    init(repo: Repository, appleDeviceId: String, noopDeviceId: String) {
+    init(repo: Repository, appleDeviceId: String, noopDeviceId: String, profile: ProfileStore) {
         self.repo = repo
         self.appleDeviceId = appleDeviceId
         self.noopDeviceId = noopDeviceId
+        self.profile = profile
         // Order matters: a free-signed build with no HealthKit entitlement is dead in the water even
         // where the hardware supports Health, so surface that first. `.unavailable` (no HealthKit at
         // all, e.g. iPad without the framework) still wins where it applies because we only reach the
@@ -876,6 +880,8 @@ final class HealthKitBridge: ObservableObject {
         await attempt { try await writeSleep(sessions: sessions) }
         await attempt { try await writeHeartRate(fromTs: fromTs, nowTs: nowTs) }
         await attempt { try await writeWorkouts(whoopStore: whoopStore, fromTs: fromTs, toTs: nowTs) }
+        // Opt-in, OFF by default (fork): the strap's heart-rate active energy, hour by hour.
+        await attempt { try await writeActiveEnergy(whoopStore: whoopStore, nowTs: nowTs) }
         if let firstError { throw firstError }
     }
 
@@ -1270,11 +1276,7 @@ final class HealthKitBridge: ObservableObject {
                                                          limit: Self.workoutReadLimit)
         let mine = mineRead ?? []
         let computed = computedRead ?? []
-        var byKey: [String: WorkoutRow] = [:]
-        for w in computed + mine where w.source != HealthKitBridge.appleWorkoutSource {
-            byKey["\(w.startTs):\(w.sport)"] = w
-        }
-        let rows = byKey.values.sorted { $0.startTs < $1.startTs }
+        let rows = Self.exportedWorkouts(computed: computed, mine: mine)
 
         func key(_ row: WorkoutRow) -> String { HealthWriteback.appleHealthWorkoutKey(startTs: row.startTs) }
 
@@ -1362,6 +1364,211 @@ final class HealthKitBridge: ObservableObject {
                 throw error
             }
         }
+    }
+
+    /// The workouts `writeWorkouts` writes to Health out of the two store reads: NOOP's own (detected,
+    /// manual, recorded), never the ones imported FROM Health, one per start and sport with the row under
+    /// `noopDeviceId` winning over its computed twin. Shared with `writeActiveEnergy`, which leaves exactly
+    /// these windows to the energy sample each of them carries.
+    private static func exportedWorkouts(computed: [WorkoutRow], mine: [WorkoutRow]) -> [WorkoutRow] {
+        var byKey: [String: WorkoutRow] = [:]
+        for w in computed + mine where w.source != HealthKitBridge.appleWorkoutSource {
+            byKey["\(w.startTs):\(w.sport)"] = w
+        }
+        return byKey.values.sorted { $0.startTs < $1.startTs }
+    }
+
+    // MARK: - Strap active energy (fork)
+
+    /// The Apple Health screen's switch for `writeActiveEnergy`. OFF until the wearer turns it on: it puts
+    /// a new energy line into a store they read elsewhere, and an update must not change their totals
+    /// unasked.
+    nonisolated static let activeEnergyWriteKey = "noop.health.writeActiveEnergy"
+
+    /// UserDefaults key for what the energy write last wrote, as local day → the signature of the inputs it
+    /// was computed from. Not per strap: the signature already carries every strap id's HR fingerprint, so
+    /// a strap switch changes it, and the record doubles as the "something of ours is in Health" mark that
+    /// switching the write off acts on, which must not depend on which strap is active.
+    private static let activeEnergyDaysKey = "hkActiveEnergyDays.v1"
+
+    /// How many local days the energy write keeps in step, today included.
+    private static let activeEnergyDayCount = 14
+
+    /// Part of every day's signature, so a change to the estimate or the split rewrites the window.
+    private static let activeEnergyModel = "day-energy-hourly-v1"
+
+    /// Write the strap's heart-rate ACTIVE energy into Health as hourly `activeEnergyBurned` samples.
+    ///
+    /// The figure is `Calories.estimateDayEnergy`'s `activeKcal`: energy above the resting floor while the
+    /// heart rate is at exercise level (half the heart-rate reserve and up), the active half of the day
+    /// estimate NOOP shows. Lower heart rate, ordinary walking included, sits inside the resting floor and
+    /// earns nothing here, which is the estimator's own rule against counting a whole day as exercise. The
+    /// inputs are read the way `IntelligenceEngine` reads them for that day (profile, HRmax override or
+    /// Tanaka, the day's computed resting HR), and `Calories.activeEnergyBuckets` splits the same walk into
+    /// local clock hours, so a day total read out of Health adds up to the day estimate.
+    ///
+    /// Hours rather than one sample a day: a day total is then a plain sum, and Health can settle an overlap
+    /// with an Apple Watch hour by hour through its source priority instead of all or nothing.
+    ///
+    /// Workouts this bridge writes carry their own energy sample (`writeWorkouts`), from the same source, so
+    /// their windows are excluded: without that a strap workout would count twice in one day total.
+    ///
+    /// Dedup like the vitals: every sample carries `HKMetadataKeyExternalUUID = noop:activeEnergy:<hourStart>`
+    /// and a recomputed day first deletes the keys of ALL its hours from our own source, so an hour that no
+    /// longer earns anything (a re-scored resting HR moved the gate) loses its old sample instead of keeping
+    /// it. Never a range delete: the workouts' energy samples share this type and source and carry no key.
+    ///
+    /// A day is recomputed only when its inputs moved (its HR fingerprint, resting HR, the profile, its
+    /// workout windows), so a settled day costs two indexed aggregates per strap id.
+    ///
+    /// Switched off after it has written, it takes back everything it wrote, once.
+    private func writeActiveEnergy(whoopStore: WhoopStore, nowTs: Int) async throws {
+        guard let type = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
+              store.authorizationStatus(for: type) == .sharingAuthorized else { return }
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: Self.activeEnergyWriteKey) else {
+            guard let record = defaults.dictionary(forKey: Self.activeEnergyDaysKey) else { return }
+            try await deleteWrittenActiveEnergy(type: type, recordedDays: Array(record.keys))
+            defaults.removeObject(forKey: Self.activeEnergyDaysKey)
+            return
+        }
+
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(nowTs)))
+        guard let firstDay = cal.date(byAdding: .day, value: -(Self.activeEnergyDayCount - 1), to: today)
+        else { return }
+        let fromDay = HealthKitBridge.dayString(firstDay)
+        let toDay = HealthKitBridge.dayString(today)
+
+        // What IntelligenceEngine hands analyzeDay: the profile as a UserProfile, the HRmax override or
+        // nothing (analyzeDay then takes Tanaka from age), and the day's own resting HR.
+        let body = UserProfile(weightKg: profile.weightKg, heightCm: profile.heightCm,
+                               age: Double(profile.age), sex: profile.sex)
+        let hrmax: Double? = profile.hrMaxOverride > 0 ? Double(profile.hrMaxOverride)
+            : (body.age > 0 ? StrainScorer.tanakaHRmax(age: body.age) : nil)
+        let computedDays = (try? await whoopStore.dailyMetrics(deviceId: computedDeviceId, from: fromDay, to: toDay)) ?? []
+        let importedDays = (try? await whoopStore.dailyMetrics(deviceId: noopDeviceId, from: fromDay, to: toDay)) ?? []
+        var restingByDay: [String: Int] = [:]
+        for row in importedDays { if let rhr = row.restingHr { restingByDay[row.day] = rhr } }
+        // The computed value wins: it is the one the day's own energy estimate was scored with.
+        for row in computedDays { if let rhr = row.restingHr { restingByDay[row.day] = rhr } }
+
+        var workoutWindows: [Range<Int>] = []
+        if store.authorizationStatus(for: .workoutType()) == .sharingAuthorized {
+            // A failed read cannot say which hours a workout already covers in Health, and writing without
+            // it could count a workout twice, so the pass waits for a read that works.
+            let from = Int(firstDay.timeIntervalSince1970) - 86_400
+            guard let mine = try? await whoopStore.workouts(deviceId: noopDeviceId, from: from, to: nowTs,
+                                                             limit: Self.workoutReadLimit),
+                  let computed = try? await whoopStore.workouts(deviceId: computedDeviceId, from: from, to: nowTs,
+                                                                 limit: Self.workoutReadLimit)
+            else { return }
+            workoutWindows = Self.exportedWorkouts(computed: computed, mine: mine)
+                .filter { ($0.energyKcal ?? 0) > 0 && $0.endTs > $0.startTs }
+                .map { $0.startTs..<$0.endTs }
+        }
+
+        let profileSignature = [body.weightKg, body.heightCm, body.age, hrmax ?? 0]
+            .map { String($0.bitPattern) }.joined(separator: ":") + ":" + body.sex
+        let written = (defaults.dictionary(forKey: Self.activeEnergyDaysKey) as? [String: String]) ?? [:]
+        var recomputed: [String: String] = [:]
+        var keys: [String] = []
+        var samples: [HKQuantitySample] = []
+        var day = firstDay
+        while day <= today {
+            guard let next = cal.date(byAdding: .day, value: 1, to: day) else { break }
+            defer { day = next }
+            let dayKey = HealthKitBridge.dayString(day)
+            // Local midnight to local midnight, so a DST day has its 23 or 25 hours.
+            let lo = Int(day.timeIntervalSince1970), hi = Int(next.timeIntervalSince1970)
+            let windows = workoutWindows.filter { $0.lowerBound < hi && $0.upperBound > lo }
+            let resting = restingByDay[dayKey]
+            let fingerprint = await repo.hrFingerprintUnion(from: lo, to: hi - 1)
+            let signature = [Self.activeEnergyModel, fingerprint, resting.map { String($0) } ?? "-",
+                             profileSignature,
+                             windows.map { "\($0.lowerBound)-\($0.upperBound)" }.joined(separator: ",")]
+                .joined(separator: "|")
+            guard written[dayKey] != signature else { continue }
+            recomputed[dayKey] = signature
+            let hr = await repo.hrSamples(from: lo, to: hi - 1, limit: 200_000)
+            let buckets = Calories.activeEnergyBuckets(hr, profile: body, hrmax: hrmax,
+                                                       restingHR: resting.map { Double($0) },
+                                                       origin: lo, bucketSeconds: 3_600, excluding: windows)
+            for hour in stride(from: lo, to: hi, by: 3_600) {
+                let key = HealthWriteback.appleHealthActiveEnergyKey(hourStartTs: hour)
+                keys.append(key)
+                // The hour still running ends now: HealthKit refuses a sample that ends in the future.
+                let end = min(hour + 3_600, hi, nowTs)
+                guard let kcal = buckets[hour], kcal > 0, end > hour else { continue }
+                samples.append(HKQuantitySample(
+                    type: type, quantity: .init(unit: .kilocalorie(), doubleValue: kcal),
+                    start: Date(timeIntervalSince1970: TimeInterval(hour)),
+                    end: Date(timeIntervalSince1970: TimeInterval(end)),
+                    metadata: [HKMetadataKeyExternalUUID: key]))
+            }
+        }
+        guard !recomputed.isEmpty else { return }
+
+        // Delete-then-write, and strictly: a delete that failed would leave the old hours beside the new
+        // ones, and for an energy total that is a double count rather than a duplicate point.
+        let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            HKQuery.predicateForObjects(from: HKSource.default()),
+            HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID, allowedValues: keys),
+        ])
+        _ = try await store.deleteObjects(of: type, predicate: pred)
+        if !samples.isEmpty { try await store.save(samples) }
+        // Recorded only once saved, so a failed pass recomputes the same days next time. Days that left the
+        // window are dropped from the record; their samples stay in Health as written.
+        var record = written.filter { $0.key >= fromDay }
+        record.merge(recomputed) { _, new in new }
+        defaults.set(record, forKey: Self.activeEnergyDaysKey)
+    }
+
+    /// Delete every `activeEnergyBurned` sample the energy write put into Health, for the switch going off.
+    ///
+    /// Two passes, both limited to our own source and to samples carrying an energy key, because the energy
+    /// samples our workouts carry share this type and source, have no key, and must stay with their
+    /// workouts. First by key over every hour of the days on record, which needs nothing but the share
+    /// permission the write itself had. Then a read of our own samples for any energy key the record no
+    /// longer names (a day that left the window, an hour laid out in another time zone). Apple documents
+    /// that an app allowed to share a type still sees its own samples of it without read permission; the
+    /// first pass does not lean on that.
+    private func deleteWrittenActiveEnergy(type: HKQuantityType, recordedDays: [String]) async throws {
+        let bySource = HKQuery.predicateForObjects(from: HKSource.default())
+        let cal = Calendar.current
+        var keys: [String] = []
+        for dayKey in recordedDays {
+            guard let day = HealthKitBridge.date(from: dayKey),
+                  let next = cal.date(byAdding: .day, value: 1, to: day) else { continue }
+            for hour in stride(from: Int(day.timeIntervalSince1970), to: Int(next.timeIntervalSince1970), by: 3_600) {
+                keys.append(HealthWriteback.appleHealthActiveEnergyKey(hourStartTs: hour))
+            }
+        }
+        if !keys.isEmpty {
+            let byKey = HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID, allowedValues: keys)
+            _ = try await store.deleteObjects(of: type, predicate: NSCompoundPredicate(
+                andPredicateWithSubpredicates: [bySource, byKey]))
+        }
+        let rest: [HKSample] = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[HKSample], Error>) in
+            let q = HKSampleQuery(sampleType: type, predicate: bySource,
+                                  limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
+                if let error { cont.resume(throwing: error); return }
+                cont.resume(returning: (samples ?? []).filter {
+                    ($0.metadata?[HKMetadataKeyExternalUUID] as? String)?
+                        .hasPrefix(HealthWriteback.appleHealthActiveEnergyKeyPrefix) == true
+                })
+            }
+            store.execute(q)
+        }
+        guard !rest.isEmpty else { return }
+        try await store.delete(rest)
+    }
+
+    /// Whether Health lets NOOP write Active Energy at all, for the energy switch to say so when it cannot.
+    /// Share status is the one HealthKit reports, and the only one the write needs.
+    var canWriteActiveEnergy: Bool {
+        guard let type = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned) else { return false }
+        return store.authorizationStatus(for: type) == .sharingAuthorized
     }
 
     /// Reverse of `sportName`: NOOP's sport label → the `HKWorkoutActivityType` written to Health.

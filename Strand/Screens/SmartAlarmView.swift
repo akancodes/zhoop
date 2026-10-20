@@ -42,6 +42,28 @@ struct SmartAlarmView: View {
     /// Calendar weekday numbers laid out Monday-first (Mon…Sun → 2,3,4,5,6,7,1), matching AutomationsView.
     private static let weekdayOrder = [2, 3, 4, 5, 6, 7, 1]
 
+    #if os(iOS)
+    /// The iPhone alarm switch (fork, `PhoneWakeAlarm`), OFF by default. Persisted under the key the alarm
+    /// reads, so `AppModel.applySmartAlarm` and this screen can never hold two answers.
+    @AppStorage(PhoneWakeAlarm.enabledKey) private var phoneAlarmOn = false
+    /// The alarm permission as iOS last reported it, nil until read. Read on appear and only with the switch
+    /// on, so a screen visit by someone who never opted in does not touch AlarmKit; re-read on every appear
+    /// because it lives in Settings and can change while NOOP is closed.
+    @State private var phonePermission: PhoneWakeAlarm.Permission?
+    /// Shown when the wearer switches the iPhone alarm on but iOS refuses alarms for NOOP.
+    @State private var showAlarmsDeniedAlert = false
+    #endif
+
+    /// Whether the iPhone alarm will actually ring at the strap alarm's times: switched on, allowed by iOS,
+    /// and riding on a strap alarm that is on. Always false on macOS and before iOS 26.
+    private var phoneAlarmWillRing: Bool {
+        #if os(iOS)
+        return behavior.smartAlarmEnabled && phoneAlarmOn && phonePermission == .authorized
+        #else
+        return false
+        #endif
+    }
+
     var body: some View {
         // #766: retitled to "Alarms" because it now holds BOTH the strap's silent wake-alarm and the
         // evening wind-down reminder, so naming it "Wind-Down" undersold it. One surface, clearly labelled.
@@ -61,6 +83,9 @@ struct SmartAlarmView: View {
         } message: {
             Text("Turn on notifications for NOOP in Settings to get your wind-down reminder.")
         }
+        #if os(iOS)
+        .onAppear { if phoneAlarmOn { phonePermission = PhoneWakeAlarm.permission } }
+        #endif
     }
 
     /// Deep-link to the OS notification settings so a user who denied can flip it back on — the system
@@ -187,23 +212,41 @@ struct SmartAlarmView: View {
     // The up-front, honest note about the difference between the strap's silent buzz (above) and a loud
     // phone wake. The strap alarm is real, but it's a gentle wrist buzz, not a sound, so we say plainly
     // to keep a backup, and that the louder smart wake lives on Android.
+    //
+    // Fork: on iOS 26 the "can't sound a guaranteed wake" half stopped being true, because AlarmKit lets
+    // this build ring a real alarm (`PhoneWakeAlarm`). The card now says what the iPhone alarm is doing, and
+    // keeps its original words, translations included, only where that alarm cannot exist (macOS, older iOS).
     private var honestyCard: some View {
         StrandCard(padding: 20) {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "bell.slash")
-                    .foregroundStyle(StrandPalette.statusWarning)
+                Image(systemName: phoneAlarmWillRing ? "bell.fill" : "bell.slash")
+                    .foregroundStyle(phoneAlarmWillRing ? StrandPalette.accent : StrandPalette.statusWarning)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 6) {
                     Text("The strap alarm is a silent buzz, not a sound")
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Text("The wake-alarm above buzzes your wrist from the strap's own firmware. It can't sound a loud alarm. We also schedule a backup notification at your wake time, but a sideloaded app can't sound a guaranteed wake on this device (that needs a critical-alert permission this build doesn't have), so Focus or silent mode can still mute it. Keep your phone's built-in Clock alarm as your real backup. NOOP's phone-based smart wake (light-sleep detection) is available on the Android app.")
+                    honestyBody
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
+    }
+
+    /// The honesty card's paragraph for what will actually happen at the wake time. Hoisted out of the card
+    /// to keep the branching off the type-check budget.
+    private var honestyBody: Text {
+        #if os(iOS)
+        if phoneAlarmWillRing {
+            return Text("The wake-alarm above buzzes your wrist from the strap's own firmware, and on some straps that buzz is not guaranteed. Your iPhone alarm rings at the same times: iOS sounds it through silent mode and Focus, and you stop it like any iPhone alarm. It rings at the set time and does not watch your sleep. NOOP's phone-based smart wake (light-sleep detection) is available on the Android app.")
+        }
+        if PhoneWakeAlarm.isSupported {
+            return Text("The wake-alarm above buzzes your wrist from the strap's own firmware. It can't sound a loud alarm, and the backup notification NOOP schedules at your wake time can be muted by Focus or silent mode. With the strap alarm on, “Ring my iPhone too” above adds a real iPhone alarm at the same times, which sounds through both. Otherwise keep your phone's built-in Clock alarm as your backup. NOOP's phone-based smart wake (light-sleep detection) is available on the Android app.")
+        }
+        #endif
+        return Text("The wake-alarm above buzzes your wrist from the strap's own firmware. It can't sound a loud alarm. We also schedule a backup notification at your wake time, but a sideloaded app can't sound a guaranteed wake on this device (that needs a critical-alert permission this build doesn't have), so Focus or silent mode can still mute it. Keep your phone's built-in Clock alarm as your real backup. NOOP's phone-based smart wake (light-sleep detection) is available on the Android app.")
     }
 
     // MARK: - Strap silent wake-alarm (#766, moved here from Automations)
@@ -318,6 +361,9 @@ struct SmartAlarmView: View {
                             .foregroundStyle(StrandPalette.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    #if os(iOS)
+                    if PhoneWakeAlarm.isSupported { phoneAlarmRow }
+                    #endif
                 }
             }
             .onChangeCompat(of: behavior.smartAlarmEnabled) { _ in model.applySmartAlarm() }
@@ -325,6 +371,72 @@ struct SmartAlarmView: View {
             .onChangeCompat(of: behavior.smartAlarmWeekdays) { _ in model.applySmartAlarm() }
         }
     }
+
+    #if os(iOS)
+    // MARK: - iPhone alarm (fork, `PhoneWakeAlarm`)
+
+    // A real iOS alarm at the strap alarm's own times, for a strap whose buzz is not guaranteed. It lives in
+    // the strap alarm's card because it has no settings of its own: the time, the days and the per-day times
+    // above are its schedule, so there is no second wake time on this screen to disagree with the first.
+    @ViewBuilder private var phoneAlarmRow: some View {
+        Divider().overlay(StrandPalette.hairline)
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Ring my iPhone too")
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text("A real iPhone alarm at the same times as the strap alarm, on the same days and with your per-day times. iOS sounds it through silent mode and Focus. There is no snooze.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Toggle("", isOn: phoneAlarmBinding)
+                .labelsHidden().toggleStyle(.switch).tint(StrandPalette.accent)
+                .accessibilityLabel("Ring my iPhone too")
+        }
+        .frame(minHeight: 42)
+        .alert(String(localized: "Alarms are off for NOOP"), isPresented: $showAlarmsDeniedAlert) {
+            Button(String(localized: "Open Settings")) { Self.openNotificationSettings() }
+            Button(String(localized: "Not now"), role: .cancel) {}
+        } message: {
+            Text("Allow alarms for NOOP in Settings so your iPhone can ring at your wake time.")
+        }
+        if phoneAlarmOn && phonePermission == .denied {
+            Text("Alarms are not allowed for NOOP in Settings, so your iPhone will not ring. Allow them under Settings › NOOP.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.statusWarning)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The iPhone alarm switch. Turning it on asks iOS first and only then saves "on", so a refusal leaves the
+    /// switch off with the way to Settings, rather than an "on" that will never ring. Either way the alarm is
+    /// re-synced through `applySmartAlarm`, the one place every alarm on this screen is armed from.
+    private var phoneAlarmBinding: Binding<Bool> {
+        Binding(
+            get: { phoneAlarmOn },
+            set: { on in
+                guard on else {
+                    phoneAlarmOn = false
+                    model.applySmartAlarm()
+                    return
+                }
+                Task { @MainActor in
+                    let permission = await PhoneWakeAlarm.requestPermission()
+                    phonePermission = permission
+                    if permission == .authorized {
+                        phoneAlarmOn = true
+                        model.applySmartAlarm()
+                    } else {
+                        showAlarmsDeniedAlert = permission == .denied
+                    }
+                }
+            }
+        )
+    }
+    #endif
 
     private var windDownCard: some View {
         // Rest-tinted when armed so the active state reads in the sleep world; neutral when off.
@@ -512,8 +624,15 @@ struct SmartAlarmView: View {
     ///
     /// `from` is a parameter so the ticking countdown re-resolves against the clock it is given rather
     /// than a `Date()` captured somewhere else.
-    private func nextStrapAlarm(from now: Date = Date()) -> Date? {
-        guard behavior.smartAlarmEnabled, strapAlarmWillArm else { return nil }
+    ///
+    /// `countingPhone` (fork) widens the gate to the iPhone alarm, which rings at this same moment from the
+    /// same resolver (`PhoneWakeAlarm.slots`). The hero's countdown is about whatever goes off, so it counts
+    /// the iPhone alarm too, even for a 5/MG strap that will not arm; the lines that name the strap's buzz
+    /// stay strap-only. Still one funnel, so the two can only differ on whether anything fires, never on when.
+    private func nextStrapAlarm(from now: Date = Date(), countingPhone: Bool = false) -> Date? {
+        guard behavior.smartAlarmEnabled, strapAlarmWillArm || (countingPhone && phoneAlarmWillRing) else {
+            return nil
+        }
         return AppModel.nextSmartAlarmDate(minutes: behavior.smartAlarmMinutes,
                                            weekdays: behavior.smartAlarmWeekdays,
                                            overrides: overrides,
@@ -531,7 +650,7 @@ struct SmartAlarmView: View {
     /// fire: straddle that moment and the countdown says "less than a minute" while the stamp names
     /// tomorrow. Two lines disagreeing about one fact is the exact defect this screen exists to remove.
     private func nextStrapAlarmStamp(from now: Date = Date()) -> String? {
-        nextStrapAlarm(from: now).map { date in
+        nextStrapAlarm(from: now, countingPhone: true).map { date in
             let formatter = DateFormatter()
             formatter.locale = AppLanguage.activeLocale
             formatter.setLocalizedDateFormatFromTemplate("EEE d MMM jj:mm")
@@ -548,7 +667,7 @@ struct SmartAlarmView: View {
     /// `DateComponentsFormatter` rather than hand-built text because the unit words pluralise differently
     /// per language, and an app that ships nine of them should not be writing "1 hours".
     private func strapAlarmCountdown(from now: Date) -> String? {
-        guard let next = nextStrapAlarm(from: now) else { return nil }
+        guard let next = nextStrapAlarm(from: now, countingPhone: true) else { return nil }
         let seconds = next.timeIntervalSince(now)
         // Under a minute there is no useful number left, and "in 0 minutes" reads like a bug.
         guard seconds >= 60 else { return String(localized: "Alarm in less than a minute") }

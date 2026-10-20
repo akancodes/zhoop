@@ -170,8 +170,8 @@ public enum HealthWriteback {
     /// the record's own identity, stable across strap lifecycle changes.
     ///
     /// `kind` is the metric's `HKQuantityTypeIdentifier.rawValue` for vitals, `"sleep"` for sleep
-    /// sessions, or `"workout"` for workouts. `identity` is the day key ("yyyy-MM-dd") for vitals or
-    /// the unix-second start timestamp for sleep/workout.
+    /// sessions, `"workout"` for workouts, or `"activeEnergy"` for the hourly strap energy. `identity` is
+    /// the day key ("yyyy-MM-dd") for vitals or the unix-second start timestamp for the others.
     public static func appleHealthExternalUUID(kind: String, identity: String) -> String {
         "noop:\(kind):\(identity)"
     }
@@ -216,6 +216,18 @@ public enum HealthWriteback {
     /// The workout key: `noop:workout:<startTs>`.
     public static func appleHealthWorkoutKey(startTs: Int) -> String {
         appleHealthExternalUUID(kind: "workout", identity: "\(startTs)")
+    }
+
+    /// The prefix every hourly active-energy key carries, without the identity.
+    ///
+    /// Switching the energy write off takes back what it wrote, and it finds those samples by this prefix:
+    /// our workouts write `activeEnergyBurned` too, from the same source and with no key, so neither the
+    /// type nor the source alone may decide what goes. Kept beside the key builder so the two cannot drift.
+    public static let appleHealthActiveEnergyKeyPrefix = "noop:activeEnergy:"
+
+    /// The hourly active-energy key: `noop:activeEnergy:<hourStartTs>`, the hour's unix start second.
+    public static func appleHealthActiveEnergyKey(hourStartTs: Int) -> String {
+        appleHealthExternalUUID(kind: "activeEnergy", identity: "\(hourStartTs)")
     }
 
     // MARK: - #1503 stranded-records sweep completion tracking

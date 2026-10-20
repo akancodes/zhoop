@@ -1695,6 +1695,10 @@ final class AppModel: ObservableObject {
 
     func applySmartAlarm() {
         let overrides = WindDownNudge.perDayWakeOverrides
+        // The iPhone alarm (fork, `PhoneWakeAlarm`) follows every branch below, including both disarms: it
+        // rings only where the strap alarm is armed. Its own switch is OFF by default, and while it is off
+        // with nothing of ours scheduled this touches nothing.
+        syncPhoneWakeAlarm(overrides: overrides)
         guard behavior.smartAlarmEnabled else {
             ble.disableStrapAlarm()
             Self.cancelSmartAlarmBackupNotification()
@@ -1719,6 +1723,18 @@ final class AppModel: ObservableObject {
                                                   log: { [weak self] line in
                                                       Task { @MainActor in self?.live.append(log: line) }
                                                   })
+    }
+
+    /// Hand the strap alarm's current settings to the iPhone alarm (fork). iOS only: AlarmKit has no macOS
+    /// counterpart, and `PhoneWakeAlarm` itself is iOS 26+ and a no-op below that.
+    private func syncPhoneWakeAlarm(overrides: [Int: Int]) {
+        #if os(iOS)
+        PhoneWakeAlarm.sync(alarmOn: behavior.smartAlarmEnabled,
+                            minutes: behavior.smartAlarmMinutes,
+                            weekdays: behavior.smartAlarmWeekdays,
+                            overrides: overrides,
+                            log: { [weak self] line in self?.live.append(log: line) })
+        #endif
     }
 
     /// Compute the next fire date for the smart alarm, honouring the weekday selection.

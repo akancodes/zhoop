@@ -280,4 +280,56 @@ final class DayCaloriesTests: XCTestCase {
         XCTAssertEqual(forward.activeKcal, 0.0, accuracy: 1e-12,
                        "the tie resolves to the lower reading, so no active energy is credited")
     }
+
+    /// The hourly split the iOS Apple Health export writes has to add up to the day it splits, or a day
+    /// total read back out of Health would disagree with the estimate it was written from.
+    func testActiveEnergyBucketsSumToTheDayEstimate() {
+        let profile = UserProfile(weightKg: 80, heightCm: 180, age: 35, sex: "male")
+        // A 30 s (5/MG-like) day: hard efforts in hours 7, 12 and 18, a moderate one in hour 13 (130 bpm
+        // clears the 120 bpm day gate), rest everywhere else.
+        let day = stride(from: 0, to: 86_400, by: 30).map { ts -> HRSample in
+            let hour = ts / 3_600
+            return HRSample(ts: ts, bpm: [7, 12, 18].contains(hour) ? 150 : (hour == 13 ? 130 : 62))
+        }
+        let energy = Calories.estimateDayEnergy(day, profile: profile, hrmax: 185, restingHR: 55)
+        let buckets = Calories.activeEnergyBuckets(day, profile: profile, hrmax: 185, restingHR: 55,
+                                                   origin: 0, bucketSeconds: 3_600)
+        XCTAssertGreaterThan(energy.activeKcal, 0)
+        XCTAssertEqual(buckets.values.reduce(0, +), energy.activeKcal, accuracy: 1e-9)
+        XCTAssertEqual(Set(buckets.keys), Set([7, 12, 13, 18].map { $0 * 3_600 }),
+                       "only the hours that earned energy are present, keyed by their start")
+        XCTAssertGreaterThan(buckets[7 * 3_600] ?? 0, buckets[13 * 3_600] ?? 0,
+                             "a harder hour earns more than a moderate one")
+    }
+
+    /// Excluding a window (a workout that carries its own energy) takes out that window's energy and
+    /// leaves every other bucket exactly as it was, because the excluded samples still set the cadence.
+    func testActiveEnergyBucketsExcludeOnlyTheGivenWindow() {
+        let profile = UserProfile(weightKg: 80, heightCm: 180, age: 35, sex: "male")
+        let day = hrDay(bpm: 60, n: 3_600) + hrDay(bpm: 150, n: 1_800, start: 3_600)
+            + hrDay(bpm: 60, n: 3_600, start: 5_400) + hrDay(bpm: 150, n: 1_800, start: 9_000)
+        let all = Calories.activeEnergyBuckets(day, profile: profile, hrmax: 185, restingHR: 55,
+                                               origin: 0, bucketSeconds: 3_600)
+        let kept = Calories.activeEnergyBuckets(day, profile: profile, hrmax: 185, restingHR: 55,
+                                                origin: 0, bucketSeconds: 3_600,
+                                                excluding: [9_000..<10_800])
+        XCTAssertEqual(Set(all.keys), [3_600, 7_200])
+        XCTAssertEqual(Set(kept.keys), [3_600], "the excluded window's hour carries nothing")
+        XCTAssertEqual(kept[3_600] ?? -1, all[3_600] ?? -2, accuracy: 1e-12,
+                       "the hour left in is untouched by the exclusion")
+    }
+
+    /// A sample before `origin` floors into the bucket before it rather than folding into the first.
+    func testActiveEnergyBucketsFloorBeforeTheOrigin() {
+        let profile = UserProfile(weightKg: 80, heightCm: 180, age: 35, sex: "male")
+        let buckets = Calories.activeEnergyBuckets(hrDay(bpm: 150, n: 60, start: -120), profile: profile,
+                                                   hrmax: 185, restingHR: 55,
+                                                   origin: 0, bucketSeconds: 3_600)
+        XCTAssertEqual(Array(buckets.keys), [-3_600])
+        XCTAssertTrue(Calories.activeEnergyBuckets([], profile: profile, hrmax: 185, restingHR: 55,
+                                                   origin: 0, bucketSeconds: 3_600).isEmpty)
+        XCTAssertTrue(Calories.activeEnergyBuckets(hrDay(bpm: 150, n: 60), profile: profile,
+                                                   hrmax: 185, restingHR: 55,
+                                                   origin: 0, bucketSeconds: 0).isEmpty)
+    }
 }

@@ -303,6 +303,9 @@ targets:
         NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map, and keeps recording while the screen is off. The route stays on your device. Nothing leaves it."
         NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Nothing leaves your device."
         NSHealthUpdateUsageDescription: "NOOP writes the metrics it computes from your strap back into Apple Health, on-device and only when you allow it."
+        # Fork: the opt-in iPhone alarm (Alarms → "Ring my iPhone too", StrandiOS/System/PhoneWakeAlarm.swift).
+        # AlarmKit refuses to schedule anything without this key.
+        NSAlarmKitUsageDescription: "NOOP sets an iPhone alarm at your strap alarm's wake times, only when you turn on Ring my iPhone too on the Alarms screen."
         NSMotionUsageDescription: "NOOP reads your iPhone's step count for a walking or running workout to show steps in the activity summary. It stays on your device. Nothing leaves it."
         # K4: Coach voice input. Speech is transcribed ON-DEVICE ONLY (requiresOnDeviceRecognition);
         # the mic button is disabled where the locale doesn't support that, never falls back to
@@ -363,6 +366,10 @@ targets:
       - package: MarkdownUI
       - package: ZIPFoundation
       - package: PolarProtocol
+      # Fork: AlarmKit exists from iOS 26, above this target's iOS 17 floor, so it is linked weak. An older iOS
+      # still launches the app, and the iPhone alarm is simply not offered there (`PhoneWakeAlarm.isSupported`).
+      - sdk: AlarmKit.framework
+        weak: true
       - target: NOOPiOSWidgets
       # Embed the watchOS app so the iPhone app carries it (NOOP.app/Watch/NOOPWatch.app). A watch app
       # installs by riding inside its iOS companion; without this it would never reach a paired watch.
