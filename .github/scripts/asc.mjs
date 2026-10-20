@@ -13,6 +13,9 @@
 //                     review and nothing is published.
 //   processing        waits for the build numbered BUILD_NUMBER to finish processing and fails if App Store
 //                     Connect refused it
+//   status            prints the newest builds with their TestFlight state, the app's groups, the builds each
+//                     group holds and its testers (with the state of their invitation)
+//   invite            sends (or sends again) the TestFlight invitation email to the testers named in TESTERS
 import { createPrivateKey, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -161,6 +164,58 @@ const commands = {
       await new Promise((r) => setTimeout(r, 30_000));
     }
     console.log(`::warning::Build ${number} was still ${last} after 40 minutes; TestFlight will show it when Apple is done.`);
+  },
+
+  async status() {
+    const app = await findApp();
+    if (!app) throw new Error(`No App Store Connect app for ${APP}`);
+    console.log(`App: ${app.attributes.name} (${app.id}) ${APP}`);
+    const builds = await api(`/v1/builds?filter[app]=${app.id}&sort=-uploadedDate&limit=5&include=buildBetaDetail`);
+    const details = new Map((builds.json.included ?? []).map((d) => [d.id, d.attributes]));
+    for (const b of builds.json.data) {
+      const a = b.attributes;
+      const d = details.get(b.relationships?.buildBetaDetail?.data?.id) ?? {};
+      console.log(`build ${a.version}: ${a.processingState}, internal ${d.internalBuildState ?? "?"}, ` +
+        `uploaded ${a.uploadedDate}, expired ${a.expired}, usesNonExemptEncryption ${a.usesNonExemptEncryption}`);
+    }
+    const groups = (await api(`/v1/apps/${app.id}/betaGroups?limit=50`)).json.data;
+    for (const g of groups) {
+      const ga = g.attributes;
+      const inGroup = (await api(`/v1/betaGroups/${g.id}/builds?limit=20`)).json.data.map((b) => b.attributes.version);
+      console.log(`group "${ga.name}" (${g.id}): internal ${ga.isInternalGroup}, all builds ${ga.hasAccessToAllBuilds}, ` +
+        `builds [${inGroup.join(", ")}]`);
+      for (const t of (await api(`/v1/betaGroups/${g.id}/betaTesters?limit=50`)).json.data) {
+        const ta = t.attributes;
+        const email = ta.email ?? "";
+        console.log(`  tester ${ta.firstName ?? ""} <${email[0] ?? ""}…@${email.split("@")[1] ?? ""}> ` +
+          `invite ${ta.inviteType ?? "?"}, state ${ta.state ?? "?"}`);
+      }
+    }
+  },
+
+  async invite() {
+    const app = await findApp();
+    if (!app) throw new Error(`No App Store Connect app for ${APP}`);
+    const plain = (s) => (s ?? "").normalize("NFD").replace(/\p{M}/gu, "").trim().toLowerCase();
+    const wanted = (process.env.TESTERS ?? "").split(",").map(plain).filter(Boolean);
+    const testers = (await api(`/v1/betaTesters?filter[apps]=${app.id}&limit=200`)).json.data;
+    for (const t of testers) {
+      if (!wanted.includes(plain(t.attributes.firstName))) continue;
+      const r = await api("/v1/betaTesterInvitations", {
+        method: "POST",
+        soft: true,
+        body: {
+          data: {
+            type: "betaTesterInvitations",
+            relationships: {
+              app: { data: { type: "apps", id: app.id } },
+              betaTester: { data: { type: "betaTesters", id: t.id } },
+            },
+          },
+        },
+      });
+      console.log(`${t.attributes.firstName}: ${r.status < 300 ? "invitation sent" : `not sent (${r.status}) ${JSON.stringify(r.json).slice(0, 400)}`}`);
+    }
   },
 };
 

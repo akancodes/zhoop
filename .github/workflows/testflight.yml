@@ -18,7 +18,9 @@ on:
   pull_request:
   push:
     branches: [main]
-    paths-ignore: ["**/*.md", "docs/**", "android/**", "marketing/**", ".github/ISSUE_TEMPLATE/**"]
+    # The helper script and the status workflow only talk to App Store Connect: changing them ships no build.
+    paths-ignore: ["**/*.md", "docs/**", "android/**", "marketing/**", ".github/ISSUE_TEMPLATE/**",
+                   ".github/scripts/**", ".github/workflows/testflight-status.yml"]
   workflow_dispatch:
 
 permissions:

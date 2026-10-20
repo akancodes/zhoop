@@ -1,0 +1,49 @@
+name: TestFlight status
+
+# Reads what App Store Connect has for Zhoop: the newest builds and their TestFlight state, the app's groups, the
+# builds each group holds and its testers. With "invite" ticked it first sends the TestFlight invitation email
+# again to the testers named below. It changes nothing else.
+
+on:
+  workflow_dispatch:
+    inputs:
+      invite:
+        description: Send the TestFlight invitation email again
+        type: boolean
+        default: false
+      testers:
+        description: First names of App Store Connect users, comma-separated
+        default: Bayram
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BUNDLE_ID_PREFIX: dev.akan.zhoop
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      TESTERS: ${{ inputs.testers }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: App Store Connect key
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Invite again
+        if: inputs.invite
+        run: node .github/scripts/asc.mjs invite "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Status
+        run: node .github/scripts/asc.mjs status "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Forget the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
