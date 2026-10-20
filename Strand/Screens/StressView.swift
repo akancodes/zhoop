@@ -4,6 +4,15 @@ import StrandDesign
 import StrandAnalytics
 import WhoopStore
 
+/// The shared explanation for an activity-masked gap on the Stress screen and hosted Today cards.
+/// Whole-phrase singular/plural variants keep the sentence natural in every catalog locale.
+func stressActivityMaskedHoursCaption(_ count: Int) -> String? {
+    guard count > 0 else { return nil }
+    return count == 1
+        ? String(localized: "1 hour excluded — you were moving.")
+        : String(localized: "\(count) hours excluded — you were moving.")
+}
+
 // MARK: - Stress Monitor
 //
 // A clear, Whoop-style "Stress Monitor": one 0–3 number, a band (LOW/MEDIUM/HIGH),
@@ -64,7 +73,7 @@ struct StressView: View {
     @State private var modelSignature: StressInputs?
 
     var body: some View {
-        ScreenScaffold(title: "Stress", subtitle: "Autonomic load from HRV and resting heart rate",
+        ScreenScaffold(title: "Stress", subtitle: "Autonomic load across your waking day",
                        // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
                        // alignment/spacing/header). The content is one inner eager VStack, so the staggered
                        // section reveal is unchanged; this only defers building that stack until it scrolls in.
@@ -87,7 +96,10 @@ struct StressView: View {
     }
 
     private func load() async {
-        storedSeries = await repo.series(key: "stress", source: "my-whoop")
+        guard let series = await StressLoadCancellation.read({
+            await repo.series(key: "stress", source: "my-whoop")
+        }) else { return }
+        storedSeries = series
         loaded = true
         rebuildModelIfNeeded()
         await loadDaytime()
@@ -103,7 +115,9 @@ struct StressView: View {
         let to = Int(Date().timeIntervalSince1970)
         let tz = TimeZone.current.secondsFromGMT(for: Date())
 
-        let hr = await repo.hrSamples(from: from, to: to, limit: 200_000)
+        guard let hr = await StressLoadCancellation.read({
+            await repo.hrSamples(from: from, to: to, limit: 200_000)
+        }) else { return }
         // Too few HR samples: empty the timeline AND clear the advanced readouts in lockstep. Without this
         // reset a later refresh that hits this path would leave the Advanced HRV card showing stale values
         // next to an empty timeline (the readouts are only recomputed past this guard).
@@ -113,11 +127,15 @@ struct StressView: View {
             freqHRV = nil
             return
         }
-        let rr = await repo.rrIntervals(from: from, to: to, limit: 200_000)
+        guard let rr = await StressLoadCancellation.read({
+            await repo.rrIntervals(from: from, to: to, limit: 200_000)
+        }) else { return }
         // Wrist accelerometer for the motion gate: an ambulatory hour is EXERTION, not stress, so it
         // is masked rather than scored (DaytimeStress). Same store read as R-R; empty on hardware or
         // imports with no gravity, which is exactly the "no masking, prior behaviour" degradation.
-        let gravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)
+        guard let gravity = await StressLoadCancellation.read({
+            await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)
+        }) else { return }
 
         // Score today's hours against the PERSONAL cross-day daytime baseline ONLY when the user has
         // opted in (Settings → Experimental) AND enough worn history exists (Oura-style
@@ -126,11 +144,14 @@ struct StressView: View {
         // chooseable lens, not a silent default. The mode is resolved only AFTER the HR-count guard above,
         // so the trailing-history reads are never paid on a day with no scorable timeline — and are never
         // paid at all while the toggle is OFF (the default), keeping the read byte-identical to before.
-        let mode = PuffinExperiment.stressPersonalBaselineEnabled
-            ? await daytimeScoringMode(startOfToday: startOfDay)
-            : .dayRelative
-        if case .baselineRelative = mode { daytimeUsesPersonalBaseline = true }
-        else { daytimeUsesPersonalBaseline = false }
+        guard let mode = await StressLoadCancellation.read({
+            await DaytimeStressMode.selected(
+                repo: repo,
+                startOfToday: startOfDay,
+                calendar: cal,
+                personalBaseline: PuffinExperiment.stressPersonalBaselineEnabled
+            )
+        }) else { return }
         // includeTimeline: the SLIDING read, so the screen's line moves in half-hours instead of
         // stepping through whole clock hours (#2144). The scored unit is still a full hour; this only
         // decides how often that hour is re-read, so a thin ten minutes costs the windows that overlap
@@ -147,10 +168,16 @@ struct StressView: View {
         // detached task is decorative and the work races the UI for cores anyway. StressDayCurve
         // learned that on this same issue; the continuation in UnescalatedWork is what keeps the
         // priority honest.
-        daytime = await runUnescalated(priority: .userInitiated) {
-            DaytimeStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz, mode: mode,
-                                  includeTimeline: true)
-        }
+        guard let timeline = await StressLoadCancellation.read({
+            await runUnescalated(priority: .userInitiated) {
+                DaytimeStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz, mode: mode,
+                                      includeTimeline: true)
+            }
+        }) else { return }
+        daytime = timeline
+        // Publish the mode with the timeline it describes, after the same cancellation check.
+        if case .baselineRelative = mode { daytimeUsesPersonalBaseline = true }
+        else { daytimeUsesPersonalBaseline = false }
 
         // ADDITIVE advanced readouts, computed on-demand from the SAME `rr` (no extra fetch, no
         // DB / schema change, and no effect on the 0..3 score above). Each engine returns nil when
@@ -165,55 +192,13 @@ struct StressView: View {
         // main actor and publish when done; their card is hidden until then, exactly as it is when a gate
         // is unmet. Same `runUnescalated` reasoning as above, and the default `.utility` is real here
         // because nothing escalates it: this is the phase that must yield to the UI.
-        let advanced = await runUnescalated {
-            (index: StressIndex.components(rr: rr), freq: HRVFreqDomain.freqDomain(rr: rr))
-        }
+        guard let advanced = await StressLoadCancellation.read({
+            await runUnescalated {
+                (index: StressIndex.components(rr: rr), freq: HRVFreqDomain.freqDomain(rr: rr))
+            }
+        }) else { return }
         stressIndex = advanced.index
         freqHRV = advanced.freq
-    }
-
-    /// Trailing local days folded into the personal daytime baselines the `.baselineRelative` mode
-    /// scores against. 30 mirrors the app's other rolling baselines (nightly resting-HR / HRV) and the
-    /// illness engine's ~28-day base.
-    private static let baselineHistoryDays = 30
-
-    /// Build the personal daytime baselines from the trailing `baselineHistoryDays` local days (TODAY
-    /// EXCLUDED — it's the day being scored, not part of its own baseline) and return the scoring mode
-    /// for today's intraday read: `.baselineRelative` once there's enough real worn daytime-HR history
-    /// for a usable baseline, else `.dayRelative` (the unchanged default). The only behavioural change
-    /// vs. before is that a user with a few worn days now scores today's hours against their own
-    /// cross-day floor instead of the day's own calm hours; a cold-start / sparse-history user is
-    /// byte-identical to before (`DaytimeStress.scoringMode` is the single degradation gate).
-    ///
-    /// PERF: reads each past day's raw HR (and, only when that day was worn, R-R) once, bounded per day,
-    /// off the main actor via `repo` — riding the same async `load()` the today-timeline already runs on.
-    /// Unworn days are skipped without an R-R read. The `DaytimeStress` analyze memo is untouched; the
-    /// fold itself is O(days).
-    private func daytimeScoringMode(startOfToday: Date) async -> DaytimeStress.ScoringMode {
-        let cal = Calendar.current
-        // #2107: keep each day's AGGREGATE, never its streams. This used to accumulate 30 x
-        // DaytimeDayStreams, each holding up to 200,000 HR plus 200,000 R-R samples, and hand the lot to
-        // the fold. The fold's first act is to reduce a day to two Doubles, so all that was ever wanted
-        // from thirty days was sixty numbers; holding the samples alive to produce them is what exhausted
-        // a 256MB heap on the Android twin and crashed it with an OutOfMemoryError. Reducing here lets
-        // each day's samples be released at the end of its own iteration.
-        var aggregates: [(hr: Double?, rmssd: Double?)] = []
-        aggregates.reserveCapacity(Self.baselineHistoryDays)
-        // Oldest → newest so the EWMA fold replays the history in order.
-        for back in stride(from: Self.baselineHistoryDays, through: 1, by: -1) {
-            guard let dayStart = cal.date(byAdding: .day, value: -back, to: startOfToday),
-                  let dayEnd = cal.date(byAdding: .day, value: 1, to: dayStart) else { continue }
-            let from = Int(dayStart.timeIntervalSince1970)
-            let to = Int(dayEnd.timeIntervalSince1970) - 1
-            let dayTz = TimeZone.current.secondsFromGMT(for: dayStart)
-            let dayHR = await repo.hrSamples(from: from, to: to, limit: 200_000)
-            guard !dayHR.isEmpty else { continue }   // unworn day — no floor to learn, skip the R-R read
-            let dayRR = await repo.rrIntervals(from: from, to: to, limit: 200_000)
-            aggregates.append(
-                DaytimeStress.dayDaytimeAggregate(hr: dayHR, rr: dayRR, tzOffsetSeconds: dayTz)
-            )
-        }
-        return DaytimeStress.scoringModeFromAggregates(aggregates)
     }
 
     /// Recompute the cached `StressModel` only when (repo.days, storedSeries)
@@ -253,7 +238,13 @@ struct StressView: View {
 
             // 3. Today's intraday timeline — when in the day stress ran high, + a
             //    passive Breathe suggestion when the recent hours stay elevated.
-            if let daytime, !daytime.scored.isEmpty {
+            // #2535: THREE states, not two. `daytime` is nil only while the read is still running, and this
+            // used to render nothing then, so a fold that takes seconds looked exactly like a day with no
+            // data. An empty `scored` after the read is a fact about the day and still stays silent.
+            if daytime == nil {
+                daytimeLoading()
+                    .staggeredAppear(index: 2)
+            } else if let daytime, !daytime.scored.isEmpty {
                 daytimeSection(daytime)
                     .staggeredAppear(index: 2)
             }
@@ -284,6 +275,27 @@ struct StressView: View {
     }
 
     // MARK: 3 · Daytime timeline (intraday, same 0–3 proxy)
+
+    /// The intraday timeline while its read is still running (#2535).
+    ///
+    /// Deliberately NOT the "no stress history" note: that is a conclusion, this says the answer is still
+    /// being computed, which is what a caller waiting on the thirty-day fold needs to see. Keeps the header
+    /// and tint `daytimeSection` uses, so the section does not appear out of nowhere when the read lands; the
+    /// height is approximate, not equal, since the real card carries a chart. Twin of the Kotlin
+    /// `StressDaytimeLoading`.
+    @ViewBuilder
+    private func daytimeLoading() -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Today's Timeline", overline: "Intraday")
+            NoopCard(tint: StressRamp.calm) {
+                Text("Reading today's heart rate…")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .frame(maxWidth: .infinity, minHeight: 160, alignment: .center)
+                    .multilineTextAlignment(.center)
+            }
+        }
+    }
 
     @ViewBuilder
     private func daytimeSection(_ day: DaytimeStress.Result) -> some View {
@@ -340,6 +352,12 @@ struct StressView: View {
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let maskedCaption = stressActivityMaskedHoursCaption(day.activityMaskedHours) {
+                        Text(maskedCaption)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 

@@ -72,11 +72,11 @@ enum DataBackup {
     static func runExport(checkpoint: @escaping () async -> Bool) async -> BackupResult {
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
-        catch { return .failure(String(localized: "Couldn't locate the Zhoop database. \(error.localizedDescription)")) }
+        catch { return .failure(String(localized: "Couldn't locate the NOOP database. \(error.localizedDescription)")) }
 
         let dbURL = URL(fileURLWithPath: dbPath)
         guard FileManager.default.fileExists(atPath: dbPath) else {
-            return .failure(String(localized: "There's no Zhoop data to export yet. Import or record some first."))
+            return .failure(String(localized: "There's no NOOP data to export yet. Import or record some first."))
         }
 
         // Flush the WAL so the single .sqlite carries everything. Required for ZIP (no sidecar
@@ -87,7 +87,7 @@ enum DataBackup {
 
         #if os(macOS)
         let panel = NSSavePanel()
-        panel.title = String(localized: "Export Zhoop backup")
+        panel.title = String(localized: "Export NOOP backup")
         panel.prompt = String(localized: "Export")
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = defaultBackupName()
@@ -138,7 +138,7 @@ enum DataBackup {
     private struct ExportIntegrityFailure: LocalizedError {
         let complaint: String
         var errorDescription: String? {
-            String(localized: "the Zhoop database failed its integrity check (SQLite reports: \(DatabaseIntegrity.readableComplaint(complaint))). A backup of it would not restore. Export the WHOOP-format CSV (Settings → Export data) to save what's still readable.")
+            String(localized: "the NOOP database failed its integrity check (SQLite reports: \(DatabaseIntegrity.readableComplaint(complaint))). A backup of it would not restore. Export the WHOOP-format CSV (Settings → Export data) to save what's still readable.")
         }
     }
 
@@ -266,16 +266,14 @@ enum DataBackup {
         // Stage each JSON through a temp file so it uses the exact same file-URL addEntry idiom as the DB
         // entry (one container code path, no provider-API variant to drift).
         if let settingsJSON {
-            let tmpJSON = fm.temporaryDirectory
-                .appendingPathComponent("noop-settings-\(UUID().uuidString).json")
+            let tmpJSON = NoopScratch.file("settings-\(UUID().uuidString).json")
             try settingsJSON.write(to: tmpJSON)
             defer { try? fm.removeItem(at: tmpJSON) }
             try archive.addEntry(with: BackupSettings.entryName, fileURL: tmpJSON, compressionMethod: .deflate)
         }
         // #1410: manifest LAST (after the DB + optional settings) and ALWAYS written — even a legacy
         // nil-settings backup states which build produced it.
-        let tmpManifest = fm.temporaryDirectory
-            .appendingPathComponent("noop-manifest-\(UUID().uuidString).json")
+        let tmpManifest = NoopScratch.file("manifest-\(UUID().uuidString).json")
         try manifestJSON.write(to: tmpManifest)
         defer { try? fm.removeItem(at: tmpManifest) }
         try archive.addEntry(with: BackupManifest.entryName, fileURL: tmpManifest, compressionMethod: .deflate)
@@ -308,11 +306,11 @@ enum DataBackup {
     static func writeBackup(checkpoint: @escaping () async -> Bool, to dest: URL) async -> BackupResult {
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
-        catch { return .failure(String(localized: "Couldn't locate the Zhoop database. \(error.localizedDescription)")) }
+        catch { return .failure(String(localized: "Couldn't locate the NOOP database. \(error.localizedDescription)")) }
 
         let dbURL = URL(fileURLWithPath: dbPath)
         guard FileManager.default.fileExists(atPath: dbPath) else {
-            return .failure(String(localized: "There's no Zhoop data to export yet."))
+            return .failure(String(localized: "There's no NOOP data to export yet."))
         }
         // Flush the WAL into the single file (same requirement as the interactive export: a single-file
         // ZIP has no sidecar fallback, so committed pages still in the WAL would otherwise be absent).
@@ -353,11 +351,11 @@ enum DataBackup {
     static func runImport(allowOversize: Bool = false) async -> BackupResult {
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
-        catch { return .failure(String(localized: "Couldn't locate the Zhoop database. \(error.localizedDescription)")) }
+        catch { return .failure(String(localized: "Couldn't locate the NOOP database. \(error.localizedDescription)")) }
 
         #if os(macOS)
         let panel = NSOpenPanel()
-        panel.title = String(localized: "Import Zhoop backup")
+        panel.title = String(localized: "Import NOOP backup")
         panel.prompt = String(localized: "Import")
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -397,7 +395,7 @@ enum DataBackup {
     static func restore(from pickedSource: URL) -> BackupResult {
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
-        catch { return .failure(String(localized: "Couldn't locate the Zhoop database. \(error.localizedDescription)")) }
+        catch { return .failure(String(localized: "Couldn't locate the NOOP database. \(error.localizedDescription)")) }
         return restore(from: pickedSource, toDatabaseAt: dbPath)
     }
 
@@ -416,8 +414,7 @@ enum DataBackup {
         let extractedDir: URL?
 
         if isZipFile(at: pickedSource) {
-            let tmpExtract = fm.temporaryDirectory
-                .appendingPathComponent("noop-import-\(UUID().uuidString)", isDirectory: true)
+            let tmpExtract = NoopScratch.subdirectory("import-\(UUID().uuidString)")
             do {
                 if fm.fileExists(atPath: tmpExtract.path) { try fm.removeItem(at: tmpExtract) }
                 try fm.createDirectory(at: tmpExtract, withIntermediateDirectories: true)
@@ -450,7 +447,7 @@ enum DataBackup {
 
         // Validate: must be a real SQLite database (magic header "SQLite format 3\0").
         guard isSQLiteFile(at: source) else {
-            return .failure(String(localized: "That file isn't a Zhoop backup. It doesn't look like a SQLite database."))
+            return .failure(String(localized: "That file isn't a NOOP backup. It doesn't look like a SQLite database."))
         }
 
         // Reject any backup that isn't a clean GRDB (this-app) backup. The magic check passes for ANY
@@ -462,7 +459,7 @@ enum DataBackup {
         let origin = backupOrigin(of: backupTables)
         let holdsData = backupTables.contains("device") || backupTables.contains("hrSample")
         if origin == .android || (origin == .unknown && holdsData) {
-            return .failure(String(localized: "This isn't a Zhoop backup from this app. It's missing the migration bookkeeping a Zhoop backup carries (it looks like an Android backup or another app's database), and restoring it would strand your store. To move your history across platforms, export the WHOOP-format CSV on the other device (Settings → Export data) and import that here, or import your original WHOOP / Apple Health export."))
+            return .failure(String(localized: "This isn't a NOOP backup from this app. It's missing the migration bookkeeping a NOOP backup carries (it looks like an Android backup or another app's database), and restoring it would strand your store. To move your history across platforms, export the WHOOP-format CSV on the other device (Settings → Export data) and import that here, or import your original WHOOP / Apple Health export."))
         }
 
         // #1014 defence-in-depth: both gates above read only the FIRST pages of the file — the
@@ -596,12 +593,12 @@ enum DataBackup {
         }
     }
 
-    /// "Zhoop-backup-2026-06-07.noopbak"
+    /// "NOOP-backup-2026-06-07.noopbak"
     private static func defaultBackupName() -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd"
-        return "Zhoop-backup-\(f.string(from: Date())).noopbak"
+        return "NOOP-backup-\(f.string(from: Date())).noopbak"
     }
 
     private static func timestamp() -> String {

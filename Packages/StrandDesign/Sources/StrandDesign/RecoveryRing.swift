@@ -16,7 +16,7 @@ import SwiftUI
 // optional supporting line.
 //
 // This is also the app's BRAND GLYPH: an open ~80% ring + a SOLID ACCENT CORE DOT
-// ("on-device core"). The recovery ring uniquely carries a micro "Zhoop" wordmark
+// ("on-device core"). The recovery ring uniquely carries a micro "NOOP" wordmark
 // above the number (letter-spacing ≈ .34em, tertiary) so the lock-up reads as the
 // "O" in NOOP. The arc geometry, gradient stroke, track and centre number live in
 // the shared `BevelGauge`; this view layers the wordmark + core dot on top.
@@ -34,7 +34,7 @@ public struct RecoveryRing: View {
     public var lineWidth: CGFloat
     /// Whether to show the center read-out (number + state + supporting).
     public var showsLabel: Bool
-    /// Whether to draw the micro "Zhoop" wordmark above the number. Turn it OFF for compact rings
+    /// Whether to draw the micro "NOOP" wordmark above the number. Turn it OFF for compact rings
     /// (e.g. a three-up hero row) where the number is large relative to the ring and the wordmark
     /// would crowd it.
     public var showsWordmark: Bool
@@ -93,7 +93,7 @@ public struct RecoveryRing: View {
                 bloomActive: bloomPulse
             )
             // Brand layers over the shared gauge: the solid gold CORE DOT (so the
-            // open-ring + core-dot lock-up reads), then the micro "Zhoop" wordmark
+            // open-ring + core-dot lock-up reads), then the micro "NOOP" wordmark
             // sitting just ABOVE the centre number.
             coreDot
             if showsLabel && showsWordmark { wordmark }
@@ -140,13 +140,13 @@ public struct RecoveryRing: View {
 
     // MARK: Brand layers
 
-    /// Micro "Zhoop" wordmark above the number — the recovery ring carries the
+    /// Micro "NOOP" wordmark above the number — the recovery ring carries the
     /// lock-up so its centre reads as the "O" in NOOP. ALL-CAPS, tertiary,
     /// letter-spacing ≈ .34em (× the cap height per the spec). Nudged up so it
     /// sits clear above BevelGauge's centred number.
     private var wordmark: some View {
         let size = diameter * 0.052
-        return Text("Zhoop")
+        return Text("NOOP")
             .font(StrandFont.rounded(size, weight: .bold))
             .tracking(size * 0.34)                 // ≈ .34em
             .foregroundStyle(StrandPalette.textTertiary)

@@ -5,10 +5,9 @@ import StrandDesign
 /// (#2243). Holds the surfaces that used to stack above the transcript: the data-sharing consent, the
 /// two further opt-ins that depend on it, the editable coach instructions, and the morning brief.
 ///
-/// Connection management (the provider pill, Clear conversation, Disconnect) deliberately stays on
-/// `CoachView`. Disconnect is the only route back to the setup card, which is the only place a key can
-/// be typed, and #2206 is the record of what happened the last time that control was put somewhere a
-/// presentation did not render it. The Kotlin twin `CoachSettingsScreen` splits on the same line.
+/// Connection management (the provider pill, Update key, Clear conversation, Disconnect) stays on
+/// `CoachView`, where both the conversation and the key editor are visible. The Kotlin twin
+/// `CoachSettingsScreen` splits on the same line.
 ///
 /// Presented as a sheet rather than pushed. CoachView appears in three places between the two
 /// platforms (a macOS route, an iPhone tab root whose navigation bar is hidden, and an iPhone pillar
@@ -280,7 +279,7 @@ struct CoachSettingsView: View {
                     CoachBriefScheduler.setEnabled(on, generateBrief: { await coach.generateBrief() }) { outcome in
                         if outcome == .denied {
                             briefEnabled = false
-                            briefStatus = "Notifications are off for Zhoop — enable them in Settings first."
+                            briefStatus = "Notifications are off for NOOP — enable them in Settings first."
                         }
                     }
                 }
@@ -294,7 +293,7 @@ struct CoachSettingsView: View {
                             .labelsHidden()
                             .accessibilityLabel("Morning brief time")
                     }
-                    Text("At \(Platform.deviceNounPhrase == "Mac" ? "this time" : "or soon after"), Zhoop will use your key to generate today's brief. Best-effort: \(Platform.deviceNounPhrase) decides exactly when a backgrounded app wakes.")
+                    Text("At \(Platform.deviceNounPhrase == "Mac" ? "this time" : "or soon after"), NOOP will use your key to generate today's brief. Best-effort: \(Platform.deviceNounPhrase) decides exactly when a backgrounded app wakes.")
                         .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                     NoopButton(briefGenerating ? "Generating…" : "Generate now", systemImage: "sparkles", kind: .secondary) {

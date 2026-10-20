@@ -28,6 +28,7 @@ import UIKit
 
 struct SleepView: View {
     @EnvironmentObject var repo: Repository
+    @EnvironmentObject private var router: NavRouter
     // NOTE: SleepView itself deliberately does NOT observe `LiveState` OR `AppModel`. A connected strap
     // publishes at ~1 Hz, and `AppModel` itself publishes `bpm` at that same ~1 Hz (AppModel.swift:202) —
     // `@EnvironmentObject` subscribes to the WHOLE object's `objectWillChange` regardless of which
@@ -49,6 +50,11 @@ struct SleepView: View {
     /// The repo signature the cached `model` was built from. Cheap to compute every render;
     /// when it differs from the current inputs we rebuild the model.
     @State private var modelKey: SleepInputKey?
+    @State private var loadedSleepRefresh: Int?
+    @State private var resultTracker = SleepResultChangeTracker()
+    @State private var resultNoticeVisible = false
+    @State private var resultNoticeRevision = 0
+    @State private var resultNoticeScope: String?
 
     /// Which night the hero hypnogram shows: 0 = last night, N = N sleep-sessions back.
     /// Snaps back to 0 whenever the data key changes — a stale offset would silently point
@@ -164,6 +170,11 @@ struct SleepView: View {
                     VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                         if let sleepUndo { sleepUndoBanner(sleepUndo) }
                         SleepFreshnessNote(latestWakeTs: resolved.night.session.endTs)
+                        if resultNoticeVisible {
+                            DataPendingNote(title: "Sleep result updated",
+                                            message: "This night's sleep times or total asleep changed by at least five minutes.",
+                                            symbol: "checkmark.circle")
+                        }
                         // Bleed past ScreenScaffold's 16/24 gutters so the hero column is edge-to-edge
                         // in the upper band; the night scene itself is the fixed topBackground.
                         // Customize sits at the end of the hero (not floating in a blank band).
@@ -171,6 +182,7 @@ struct SleepView: View {
                             .padding(.horizontal, -16)
                             .padding(.top, -24)
                             .staggeredAppear(index: 0)
+                        alarmsEntry
                         // #sleep-layout: the analytical cards render in the user's saved order minus the
                         // hidden set, below the pinned Rest hero. Reordered via the Arrange sheet.
                         ForEach(Array(sleepVisibleSections.enumerated()), id: \.element) { idx, section in
@@ -179,6 +191,7 @@ struct SleepView: View {
                     }
                 } else {
                     emptyState
+                    alarmsEntry
                 }
             }
             // LiquidScoreGauge owns its own count-up animation (same as Home heroes).
@@ -198,6 +211,8 @@ struct SleepView: View {
             // `decodedNight` JSON-decodes and body re-evaluates at 1Hz while HR streams. (#160)
             .onChangeCompat(of: nightOffset) { newOffset in
                 navNight = newOffset == 0 ? nil : decodedNight(at: newOffset)
+                resetResultNotice()
+                observeResultChange()
             }
             .onAppear {
                 if modelKey != key {
@@ -207,24 +222,39 @@ struct SleepView: View {
                     navNight = nil
                 }
             }
+            .onChangeCompat(of: intelligence.computing) { _ in observeResultChange() }
+            .onDisappear { resetResultNotice() }
+            .task(id: resultNoticeRevision) {
+                guard resultNoticeVisible else { return }
+                do { try await Task.sleep(nanoseconds: 8_000_000_000) }
+                catch { return }
+                resultNoticeVisible = false
+            }
             // Load EVERY sleep block across BOTH sources (un-deduplicated) so the hero's ◀/▶ can
             // browse split-sleep days the dashboard collapses — including Bluetooth-only nights,
             // whose blocks live under the computed source. Re-runs whenever a sync/import bumps
             // refreshSeq; snaps back to the newest day and rebuilds the model so offset 0 reflects
             // the freshly-loaded blocks. (#170)
             .task(id: repo.refreshSeq) {
-                allSessions = await repo.allSleepSessions()
+                let refresh = repo.refreshSeq
+                let sessions = await repo.allSleepSessions()
                 // Load the learned habitual midsleep the engine used, so the main-night pick aligns to it
                 // (a shift/late sleeper) instead of only the cold-start band. nil under threshold. (#547)
-                habitualMidsleepSec = await repo.habitualMidsleepSec()
+                let habitual = await repo.habitualMidsleepSec()
                 // Per-epoch motion for every block (#407), keyed by detected start. mergeDay reads only the
                 // already-resolved group's entries — this just pre-fetches them all so the model build is sync.
-                motionByStart = await repo.sessionMotions(sessions: allSessions)
+                let motions = await repo.sessionMotions(sessions: sessions)
+                guard !Task.isCancelled, refresh == repo.refreshSeq else { return }
+                allSessions = sessions
+                habitualMidsleepSec = habitual
+                motionByStart = motions
                 nightOffset = 0
                 navNight = nil
                 modelKey = dataKey
                 navDaysCache = SleepModel.navDays(navSessions: navSessions)
                 model = buildModel()
+                loadedSleepRefresh = refresh
+                observeResultChange()
             }
             .sheet(item: $wakeEdit) { edit in
                 // The night's RECORDED coverage for the #940 guards: from the immutable detected
@@ -271,7 +301,7 @@ struct SleepView: View {
             .sheet(item: $addNap) { seed in
                 SleepTimeEditor(bedTs: seed.bedTs, wakeTs: seed.wakeTs,
                                 title: "Add a nap",
-                                blurb: "Pick when the nap started and ended. Zhoop stages it from your data as its own session, separate from the night's sleep.",
+                                blurb: "Pick when the nap started and ended. NOOP stages it from your data as its own session, separate from the night's sleep.",
                                 bedLabel: "Nap started", wakeLabel: "Nap ended") { startTs, endTs in
                     await repo.addManualNap(startTs: startTs, endTs: endTs)
                     // Re-score so the day's aggregates pick up the new session, exactly like an edit.
@@ -280,6 +310,34 @@ struct SleepView: View {
                 }
             }
         }
+    }
+
+    /// A direct route to the one alarm screen, available even before a night is recorded.
+    private var alarmsEntry: some View {
+        // Button OUTSIDE the card, as `InsightsView.whatMovesYouLink` and `LabBookView` do: with it inside,
+        // only the row content answers a tap and the card's own padding is dead, so the same edge tap works
+        // on Android (where the whole `NoopCard` is clickable) and does nothing here.
+        Button { router.openAlarms() } label: {
+            NoopCard(tint: StrandPalette.restColor) {
+                HStack(spacing: NoopMetrics.gap) {
+                    Image(systemName: "alarm.fill")
+                        .foregroundStyle(StrandPalette.restColor)
+                        .accessibilityHidden(true)
+                    Text("Alarms")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .accessibilityHidden(true)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        // The settle-inward every tappable liquid card gets (`InsightsView.whatMovesYouLink`,
+        // `LabBookView`, `TodayView`). `.plain` would leave an edge tap with no feedback at all, where
+        // Android's `Modifier.clickable` ripples.
+        .buttonStyle(LiquidPressStyle())
     }
 
     // MARK: - 0. REST HERO — scenic backdrop + sleep-performance gauge (Bevel)
@@ -334,7 +392,7 @@ struct SleepView: View {
         // tombstone, so only it gets the "won't detect ... again" wording. (#65 banner honesty.)
         let message = banner.snapshot.session.userEdited
             ? String(localized: "Sleep deleted.")
-            : String(localized: "Sleep deleted. Zhoop won't detect sleep between \(clockTime(banner.displayStart)) and \(clockTime(banner.windowEnd)) again.")
+            : String(localized: "Sleep deleted. NOOP won't detect sleep between \(clockTime(banner.displayStart)) and \(clockTime(banner.windowEnd)) again.")
         HStack(alignment: .center, spacing: 10) {
             Image(systemName: "moon.zzz")
                 .font(.system(size: 14, weight: .semibold))
@@ -929,7 +987,11 @@ struct SleepView: View {
         // Label above the trace, plot inset 10pt to line up with the stage-timeline rows' strips
         // (the old 44+12 gutter matched the removed Hypnogram's y-axis column). (ryanAtriumAi #988)
         VStack(alignment: .leading, spacing: 2) {
-            Text("Move")
+            // "Move" alone did not say what the height means. The trace is normalised to THIS night's
+            // peak, so the tallest spike is full height whatever its absolute size and heights do not
+            // compare between nights. The strap calibrates no absolute magnitude, so naming the scale
+            // is the honest axis label rather than a number. Twin of the Kotlin `MotionStrip` label.
+            Text("Move, relative to tonight")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
             if night.motionEpochs.count >= 2 {
@@ -1083,7 +1145,7 @@ struct SleepView: View {
     /// The copy names NO cause and offers NO remedy, deliberately: on the 08-29/30 and 08-30/31 captures the
     /// missing codes DID reach NOOP — the ring reported them unwritten (0xFF), the persist log trimmed
     /// exactly as many as the hole is wide — and re-persisting the same night 5 and 8 times left the hole
-    /// intact. "The rest never reached Zhoop" and "syncing again can fill in" were both wrong. Nor does the
+    /// intact. "The rest never reached NOOP" and "syncing again can fill in" were both wrong. Nor does the
     /// copy point at the totals by DIRECTION: both hosts render this note below the stage-breakdown card
     /// that carries them, so "the totals below" pointed the wrong way on every screen that shipped it.
     private func stagePartialNote(_ coverage: Double) -> some View {
@@ -1312,10 +1374,10 @@ struct SleepView: View {
     @ViewBuilder
     private func stageBreakdownRows(_ s: Stages, palette: SleepStagePalette = .noop) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-            stageBreakdownRow(.rem,   minutes: s.rem,   total: s.total, percent: stageSharePercent(.rem, s), palette: palette)
-            stageBreakdownRow(.deep,  minutes: s.deep,  total: s.total, percent: stageSharePercent(.deep, s), palette: palette)
-            stageBreakdownRow(.light, minutes: s.light, total: s.total, percent: stageSharePercent(.light, s), palette: palette)
             stageBreakdownRow(.awake, minutes: s.awake, total: s.total, percent: stageSharePercent(.awake, s), palette: palette)
+            stageBreakdownRow(.rem,   minutes: s.rem,   total: s.total, percent: stageSharePercent(.rem, s), palette: palette)
+            stageBreakdownRow(.light, minutes: s.light, total: s.total, percent: stageSharePercent(.light, s), palette: palette)
+            stageBreakdownRow(.deep,  minutes: s.deep,  total: s.total, percent: stageSharePercent(.deep, s), palette: palette)
         }
     }
 
@@ -1391,8 +1453,8 @@ struct SleepView: View {
     /// let`, which would have frozen the reader's choice at first use until the app relaunched.
     private static var stageAxisFormatter: DateFormatter { AppClock.hourMinuteFormatter() }
 
-    /// The WHOOP sleep-stages chart: a stack of four per-stage timeline rows (AWAKE · LIGHT ·
-    /// DEEP · REM, WHOOP's order) over a shared onset→wake time axis. Each row is independently
+    /// The sleep-stages chart: four per-stage timeline rows in chart-depth order (AWAKE · REM ·
+    /// LIGHT · DEEP) over a shared onset→wake time axis. Each row is independently
     /// legible no matter how fragmented the on-device staging is — segments in one row can never
     /// tangle with another stage's, which is exactly why WHOOP renders sleep this way.
     @ViewBuilder
@@ -1408,14 +1470,15 @@ struct SleepView: View {
             sleepHeadline(s)
             // WHOOP's sleeping heart-rate chart above the rows: thin HR trace across the night.
             // Selecting a stage tints the trace + washes the chart columns during that stage.
-            sleepHRChart(intervals: smoothed, origin: origin, span: span, night: night)
+            SleepHRChart(nightHR: nightHR, intervals: smoothed, origin: origin, span: span, night: night,
+                         selectedStage: selectedStage, timeFormatter: Self.stageAxisFormatter)
                 .frame(height: 124)
                 .padding(.horizontal, 10)
                 .padding(.bottom, 2)
             stageTimelineRow(.awake, minutes: s.awake, percent: stageSharePercent(.awake, s), intervals: smoothed, origin: origin, span: span)
+            stageTimelineRow(.rem,   minutes: s.rem,   percent: stageSharePercent(.rem, s), intervals: smoothed, origin: origin, span: span)
             stageTimelineRow(.light, minutes: s.light, percent: stageSharePercent(.light, s), intervals: smoothed, origin: origin, span: span)
             stageTimelineRow(.deep,  minutes: s.deep,  percent: stageSharePercent(.deep, s), intervals: smoothed, origin: origin, span: span)
-            stageTimelineRow(.rem,   minutes: s.rem,   percent: stageSharePercent(.rem, s), intervals: smoothed, origin: origin, span: span)
             // onset · midpoint · wake clock labels, aligned with the rows' inner strips.
             HStack {
                 Text(Self.stageAxisFormatter.string(from: night.onsetDate))
@@ -1614,121 +1677,6 @@ struct SleepView: View {
         .accessibilityAddTraits(.isButton)
     }
 
-    /// WHOOP's sleeping heart-rate chart: a thin HR trace across the night with dashed onset/wake
-    /// rules and quiet bpm gridlines. With a stage selected, the trace re-colours inside that
-    /// stage's intervals and those time columns get a faint stage-tinted wash — WHOOP's "what did
-    /// my heart do during REM" read. Canvas-drawn (~550 one-minute buckets), gaps in the data
-    /// break the line honestly rather than interpolating across them.
-    @ViewBuilder
-    private func sleepHRChart(intervals: [SleepInterval], origin: TimeInterval, span: TimeInterval, night: Night) -> some View {
-        let nightStartTs = night.onsetDate.timeIntervalSince1970
-        let buckets = nightHR.filter {
-            let rel = TimeInterval($0.ts) - nightStartTs
-            return rel >= origin - 60 && rel <= origin + span + 60
-        }
-        if buckets.count >= 2 {
-            Canvas { ctx, size in
-                let bpms = buckets.map(\.bpm)
-                let lo = (bpms.min() ?? 40) - 5
-                let hi = (bpms.max() ?? 90) + 5
-                func point(_ b: HRBucket) -> CGPoint {
-                    let rel = TimeInterval(b.ts) - nightStartTs
-                    let x = CGFloat((rel - origin) / span) * size.width
-                    let y = size.height * (1 - CGFloat((b.bpm - lo) / max(1, hi - lo)))
-                    return CGPoint(x: x, y: y)
-                }
-                // Selected-stage column washes UNDER everything else.
-                if let sel = selectedStage {
-                    let wash = StrandPalette.sleepStageColor(sel).opacity(0.13)
-                    for iv in intervals where iv.stage == sel {
-                        let x0 = CGFloat((iv.start - origin) / span) * size.width
-                        let w = max(1, CGFloat((iv.end - iv.start) / span) * size.width)
-                        ctx.fill(Path(CGRect(x: x0, y: 0, width: w, height: size.height)), with: .color(wash))
-                    }
-                }
-                // Quiet bpm gridlines + labels at ~3 nice values.
-                let step = max(10.0, (((hi - lo) / 3) / 10).rounded() * 10)
-                var grid = (lo / step).rounded(.up) * step
-                while grid < hi {
-                    let y = size.height * (1 - CGFloat((grid - lo) / max(1, hi - lo)))
-                    var line = Path()
-                    line.move(to: CGPoint(x: 0, y: y)); line.addLine(to: CGPoint(x: size.width, y: y))
-                    ctx.stroke(line, with: .color(StrandPalette.hairline.opacity(0.5)), lineWidth: 1)
-                    ctx.draw(Text(verbatim: "\(Int(grid))").font(.system(size: 9)).foregroundColor(StrandPalette.textTertiary),
-                             at: CGPoint(x: 10, y: y - 7))
-                    grid += step
-                }
-                // Base trace across the whole night; the line BREAKS across >5-min data gaps.
-                // Split by signal confidence: clean/measured HR draws solid, weak-optical stretches
-                // (PPG conf < 0.3) draw lighter + dashed, so a weak estimate is never presented as a
-                // clean measured beat. NOTE: with the default acceptance floor (0.3) no stored PPG
-                // sample carries conf < 0.3, so this weak branch is inert unless a future opt-in
-                // weak-signal mode (which needs a faithfulness eval first) lowers the floor.
-                let baseColor = selectedStage == nil
-                    ? StrandPalette.restColor.opacity(0.9)
-                    : StrandPalette.textTertiary.opacity(0.45)
-                var strong = Path()
-                var weakPath = Path()
-                var prev: (ts: Int, pt: CGPoint, strong: Bool)? = nil
-                for b in buckets {
-                    let p = point(b)
-                    let isStrong = b.conf >= 0.3
-                    if let pr = prev, b.ts - pr.ts <= 300 {
-                        // Bridge class transitions from the previous point so the trace stays
-                        // continuous — the weak segment owns the bridging stroke.
-                        if isStrong {
-                            if pr.strong { strong.addLine(to: p) }
-                            else { strong.move(to: pr.pt); strong.addLine(to: p) }
-                        } else {
-                            if !pr.strong { weakPath.addLine(to: p) }
-                            else { weakPath.move(to: pr.pt); weakPath.addLine(to: p) }
-                        }
-                    } else {
-                        if isStrong { strong.move(to: p) } else { weakPath.move(to: p) }
-                    }
-                    prev = (b.ts, p, isStrong)
-                }
-                ctx.stroke(strong, with: .color(baseColor), style: StrokeStyle(lineWidth: 1.2, lineJoin: .round))
-                ctx.stroke(weakPath, with: .color(baseColor.opacity(0.55)),
-                           style: StrokeStyle(lineWidth: 1, lineJoin: .round, dash: [2, 3]))
-                // Selected-stage trace overlay: the HR line re-drawn in the stage colour, only
-                // inside that stage's intervals.
-                if let sel = selectedStage {
-                    let ranges = intervals.filter { $0.stage == sel }.map { ($0.start, $0.end) }
-                    var overlay = Path()
-                    var lastIn: Int? = nil
-                    for b in buckets {
-                        let rel = TimeInterval(b.ts) - nightStartTs
-                        let inside = ranges.contains { rel >= $0.0 && rel <= $0.1 }
-                        if inside {
-                            let p = point(b)
-                            if let last = lastIn, b.ts - last <= 300 { overlay.addLine(to: p) } else { overlay.move(to: p) }
-                            lastIn = b.ts
-                        } else {
-                            lastIn = nil
-                        }
-                    }
-                    ctx.stroke(overlay, with: .color(StrandPalette.sleepStageColor(sel)),
-                               style: StrokeStyle(lineWidth: 1.6, lineJoin: .round))
-                }
-                // Dashed onset/wake rules (WHOOP's sleep-window markers).
-                for x in [CGFloat(0.75), size.width - 0.75] {
-                    var rule = Path()
-                    rule.move(to: CGPoint(x: x, y: 0)); rule.addLine(to: CGPoint(x: x, y: size.height))
-                    ctx.stroke(rule, with: .color(StrandPalette.textTertiary.opacity(0.5)),
-                               style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .accessibilityLabel(Text("Sleeping heart rate through the night"))
-        } else {
-            Text("No heart-rate detail for this night")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        }
-    }
-
     /// WHOOP's diagonal-hatched timeline track: subtle 45° stripes over a dark inset well — reads
     /// as "the whole night" behind the solid stage segments, and makes gaps (other stages) obvious
     /// without drawing anything for them.
@@ -1773,6 +1721,36 @@ struct SleepView: View {
         // builds AsleepDurationData itself from the same source, so the two render identical numbers.
         AsleepDurationCard(data: AsleepDurationData(points: model.trendPoints,
                                                     typicalTotalMin: model.typicalTotalMin))
+    }
+
+    /// Compare only after the screen has loaded the refreshed blocks and scoring has settled.
+    /// The observer lives on the screen, so a hidden notice cannot stop change observation.
+    private func observeResultChange() {
+        guard loadedSleepRefresh == repo.refreshSeq, !intelligence.computing else { return }
+        guard let model else { resetResultNotice(); return }
+        let snapshot = resultSnapshot(heroNight(model))
+        if resultNoticeScope != snapshot.scope { resultNoticeVisible = false }
+        resultNoticeScope = snapshot.scope
+        if resultTracker.observe(snapshot, ready: true) {
+            resultNoticeVisible = true
+            resultNoticeRevision += 1
+        }
+    }
+
+    private func resetResultNotice() {
+        resultTracker = SleepResultChangeTracker()
+        resultNoticeVisible = false
+        resultNoticeScope = nil
+    }
+
+    private func resultSnapshot(_ night: Night) -> SleepResultSnapshot {
+        let day = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: Double(night.session.endTs)))
+        let sources = Set(night.sourceBlocks.compactMap(\.deviceId)).sorted().joined(separator: ",")
+        return SleepResultSnapshot(
+            scope: "\(repo.deviceId):\(sources):\(day.timeIntervalSince1970)",
+            onset: night.session.effectiveStartTs, wake: night.session.endTs,
+            asleepMinutes: night.stages.asleep,
+            edited: night.session.userEdited || night.sourceBlocks.contains { $0.userEdited })
     }
 
     // MARK: - Memoization plumbing
@@ -1889,9 +1867,6 @@ struct SleepView: View {
         return (first.effectiveStartTs, last.endTs)
     }
 
-    /// Soft nap-duration hint retained for callers/tests; the nap CLASSIFICATION is now purely "not the
-    /// chosen main block" (see `isNap`), never an independent duration/onset test. (#518/#547)
-    static let napMaxHours: Double = 3.0
     /// Classify a block as a nap: it's a nap exactly when it is NOT the day's chosen main block. Derived
     /// from the pick (never an independent onset/duration gate), so the label can't contradict the
     /// selection — the contradiction the audit flagged. The main block is never a nap. (#518/#547)
@@ -2649,7 +2624,7 @@ private struct SleepFreshnessNote: View {
             SyncingHistoryNote(chunks: live.syncChunksThisSession)
         case .calculating:
             DataPendingNote(title: "Calculating last night's sleep…",
-                            message: "Your strap history is in. Zhoop is detecting and staging the night now.",
+                            message: "Your strap history is in. NOOP is detecting and staging the night now.",
                             symbol: "waveform.path.ecg")
         case .syncFailed:
             DataPendingNote(title: "Last night's sleep hasn't synced",
@@ -2657,11 +2632,11 @@ private struct SleepFreshnessNote: View {
                             symbol: "exclamationmark.arrow.triangle.2.circlepath")
         case .awaitingSync:
             DataPendingNote(title: "Waiting for last night's sleep",
-                            message: "Connect the strap and sync its history. Zhoop will calculate the night when the overnight data arrives.",
+                            message: "Connect the strap and sync its history. NOOP will calculate the night when the overnight data arrives.",
                             symbol: "arrow.triangle.2.circlepath")
         case .notDetected:
             DataPendingNote(title: "Last night's sleep wasn't detected",
-                            message: "Sync finished, but Zhoop couldn't confidently identify a sleep window. Keep the strap connected and try Sync again; the older night below is still your latest detected sleep.",
+                            message: "Sync finished, but NOOP couldn't confidently identify a sleep window. Keep the strap connected and try Sync again; the older night below is still your latest detected sleep.",
                             symbol: "moon.zzz")
         case nil:
             EmptyView()
@@ -2925,7 +2900,7 @@ private struct SleepTimeEditor: View {
             // A detected night is tombstoned so it won't re-detect; a userEdited/nap row writes no
             // tombstone, so its copy drops that (false) promise. Mirrors the undo banner. (#65)
             Text(suppressesReDetection
-                 ? "Removes this recorded sleep and recomputes the day without it. Zhoop won't re-detect sleep in this window. You can undo for a few seconds after."
+                 ? "Removes this recorded sleep and recomputes the day without it. NOOP won't re-detect sleep in this window. You can undo for a few seconds after."
                  : "Removes this sleep and recomputes the day without it. You can undo for a few seconds after.")
         }
     }

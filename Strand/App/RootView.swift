@@ -25,7 +25,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
     case backupSync = "Backup & Sync"
     case fusedRecord = "Your Data, Fused"
     case devices = "Devices"
-    case noopLimitations = "Zhoop Limitations"
+    case noopLimitations = "NOOP Limitations"
     case notifications = "Notifications"
     case automation = "Automations"
     case smartAlarm = "Smart Alarm"
@@ -62,7 +62,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .backupSync: return "Backup & Sync"
         case .fusedRecord: return "Your Data, Fused"
         case .devices: return "Devices"
-        case .noopLimitations: return "Zhoop Limitations"
+        case .noopLimitations: return "NOOP Limitations"
         case .notifications: return "Notifications"
         case .automation: return "Automations"
         // "Alarms" is the ONE alarm surface (#766): the strap's silent wake-alarm (moved in from
@@ -106,7 +106,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .backupSync: return String(localized: "Backup & Sync")
         case .fusedRecord: return String(localized: "Your Data, Fused")
         case .devices: return String(localized: "Devices")
-        case .noopLimitations: return String(localized: "Zhoop Limitations")
+        case .noopLimitations: return String(localized: "NOOP Limitations")
         case .notifications: return String(localized: "Notifications")
         case .automation: return String(localized: "Automations")
         // Mirrors the `titleKey` remap above (#766): the row reads "Alarms", not the raw "Smart Alarm".
@@ -334,6 +334,7 @@ struct RootView: View {
             // #1862: the Today Coach card's launcher hands off here, so the send/stream/consent surface
             // stays in exactly one place.
             case .coach: selection = .coach
+            case .alarms: selection = .smartAlarm
             case nil: break
             }
             if dest != nil { router.requestedDestination = nil }
@@ -415,9 +416,9 @@ struct RootView: View {
     private var brand: some View {
         HStack(spacing: 8) {
             // In-app logo: the open recovery-ring mark so the wordmark reads as a true lockup
-            // (README logo system — mark + "Zhoop"). Flat gold gradient, low glow per the v3 restraint.
+            // (README logo system — mark + "NOOP"). Flat gold gradient, low glow per the v3 restraint.
             BrandMark(size: 22)
-            Text("Zhoop")
+            Text("NOOP")
                 .font(StrandFont.rounded(20, weight: .bold))
                 .foregroundStyle(StrandPalette.textPrimary)
             Spacer()
@@ -558,8 +559,11 @@ private struct SidebarStatus: View {
                 // it showed the strap's last charge with nothing connected: `batteryPct` is never cleared,
                 // which made the honest `nil` branch below unreachable on any install that had paired a
                 // strap once. "Strap not connected" was dead text.
+                // The percent goes through the same rounding seam as the Devices card, so the two never
+                // read 34% and 35% for one charge (this used to truncate).
                 Text(live.connected && live.activeIsWhoop
-                     ? live.batteryPct.map { String(localized: "Battery \(Int($0))%") } ?? String(localized: "Strap not connected")
+                     ? LiveConsoleReadout.batteryPercent(activeIsWhoop: true, whoopPct: live.batteryPct, ringPct: nil)
+                        .map { String(localized: "Battery \($0)%") } ?? String(localized: "Strap not connected")
                      : String(localized: "Strap not connected"))
                     .font(StrandFont.rounded(11))
                     .foregroundStyle(StrandPalette.textTertiary)

@@ -69,9 +69,9 @@ struct RootTabView: View {
     /// Today if they prefer it (keyed identically to the SettingsView toggle). Default ON.
     @AppStorage("noop.liquidTodayEnabled") private var liquidTodayEnabled = true
 
-    /// The Today tab root: the personal weight-loss screen.
+    /// The Today tab root, honouring the liquid/classic preference.
     @ViewBuilder private var todayTabRoot: some View {
-        CutTodayView()
+        if liquidTodayEnabled { LiquidTodayView() } else { TodayView() }
     }
 
     /// Native tab selection binding. SwiftUI sends taps on the already-selected item through the
@@ -114,16 +114,12 @@ struct RootTabView: View {
                 guard selectedTab != 0 else { return }
                 let dx = v.translation.width, dy = v.translation.height
                 guard abs(dx) > 60, abs(dx) > abs(dy) * 1.6 else { return }
-                guard let i = Self.shownTabs.firstIndex(of: selectedTab) else { return }
-                let next = Self.shownTabs[min(Self.shownTabs.count - 1, max(0, i + (dx < 0 ? 1 : -1)))]
+                let next = min(4, max(0, selectedTab + (dx < 0 ? 1 : -1)))
                 if next != selectedTab {
                     withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = next }
                 }
             }
     }
-
-    /// Tags of the tabs this build shows.
-    private static let shownTabs = [0, 2]
 
     var body: some View {
         // The platform tab bar is intentionally left fully native. iOS 26 supplies Liquid Glass and
@@ -131,15 +127,25 @@ struct RootTabView: View {
         // the corresponding system material and safe-area behaviour from the same TabView.
         TabView(selection: nativeTabSelection) {
             tab(todayTabRoot, "Today", "square.grid.2x2", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
-            tab(CutSleepView(), "Sleep", "bed.double", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
+            tab(TrendsView(), "Trends", "chart.line.uptrend.xyaxis", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
+            tab(SleepView(), "Sleep", "bed.double", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
+            // K3: Coach promoted to a top-level tab (was behind the More list). The sparkles icon
+            // matches the More-tab row and the macOS sidebar entry.
+            // Conditional on the master switch. The tags stay LITERAL rather than being renumbered when
+            // Coach is absent: `tabPaths` and `scrollTop` are indexed by tag, and More stays tag 4 in both
+            // shapes, so a wearer's More tab keeps its identity, its navigation path and its scroll
+            // position across a flip instead of inheriting Coach's.
+            if coachEnabled {
+                tab(CoachView(), "Coach", "sparkles", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
+            }
+            moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
         // Switching Coach off while STANDING on it leaves `selectedTab` pointing at a tag no tab claims
         // any more, which renders as an empty tab rather than as an error. Send that wearer to Today, and
         // only in that case, so a flip made from anywhere else does not move them.
-        // Only Today (0) and Sleep (2) remain; a route to a removed tab (Trends, Coach) lands on Today.
-        .onChangeCompat(of: selectedTab) { tag in
-            if !Self.shownTabs.contains(tag) { selectedTab = 0 }
+        .onChangeCompat(of: coachEnabled) { enabled in
+            if !enabled && selectedTab == 3 { selectedTab = 0 }
         }
         // #1841: the same "Hide bar when scrolling" preference Android drives its own bar with. Here the
         // system owns the behaviour — iOS 26's tab bar MINIMISES to a pill on scroll down rather than
@@ -201,7 +207,7 @@ struct RootTabView: View {
             case .devices:
                 showDevices = true
                 router.requestedDestination = nil
-            case .insightsHub, .labBook, .fusedRecord, .rhythm:
+            case .insightsHub, .labBook, .fusedRecord, .rhythm, .alarms:
                 routedPillar = dest
                 router.requestedDestination = nil
             case .coach:
@@ -333,6 +339,7 @@ struct RootTabView: View {
                 // `AICoachEngine.pendingPrompt`); this keeps the switch exhaustive and falls back to Coach if
                 // it ever reaches the host.
                 case .coach: CoachView()
+                case .alarms: SmartAlarmView()
                 }
             }
             // The Trends/Today fallbacks above emit TabRoute value pushes (#198), which need a
@@ -486,7 +493,7 @@ struct RootTabView: View {
                     // reads the opt-in Documents/noop_sync.txt drop file).
                     MoreRow("Shortcuts Export", "square.and.arrow.up.fill", .shortcutsExport)
                     // The plain 4.0 vs 5.0/MG capability grid — what NOOP reads live off each strap.
-                    MoreRow("Zhoop Limitations", "list.bullet.rectangle", .noopLimitations)
+                    MoreRow("NOOP Limitations", "list.bullet.rectangle", .noopLimitations)
                 }
                 moreSection("App") {
                     // #805/#811: the v7.3.1 #766 alarm consolidation moved Smart Alarm under a single

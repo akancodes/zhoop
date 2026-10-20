@@ -22,7 +22,7 @@ struct DevicesView: View {
 
     var body: some View {
         ScreenScaffold(title: "Devices",
-                       subtitle: "Pair and manage the bands Zhoop reads from.",
+                       subtitle: "Pair and manage the bands NOOP reads from.",
                        // The day-of-sky liquid backdrop, matching Today / Health / Sleep / Trends: a fixed,
                        // full-bleed time-of-day sky behind the scroll content (it does not scroll).
                        topBackground: liquidScaffoldSky()) {
@@ -33,7 +33,7 @@ struct DevicesView: View {
                 // calm pending note rather than an empty screen in that brief window.
                 DataPendingNote(
                     title: "Getting your devices ready",
-                    message: "Zhoop is opening your on-device data. Your paired bands will appear here in a moment.",
+                    message: "NOOP is opening your on-device data. Your paired bands will appear here in a moment.",
                     symbol: "badge.plus.radiowaves.right")
             }
         }
@@ -199,6 +199,10 @@ private struct DevicesContent: View {
                             whoopPct: live.batteryPct, ringPct: live.ouraBatteryPct)
                         : nil,
                     liveBatteryMv: (device.status == .active && live.connected) ? live.batteryMv : nil,
+                    livePackSocPct: (device.status == .active && live.connected
+                                     && DeviceFamily.isWhoop5Registry(model: device.model,
+                                                                      brand: device.brand))
+                        ? live.packSocPct : nil,
                     // Firmware version for the ACTIVE strap. It's a STABLE property (NOOP can't change a
                     // strap's firmware), so prefer the live handshake value but fall back to the last-known
                     // persisted firmware (written on connect in FrameRouter) when the live value is momentarily
@@ -322,7 +326,7 @@ private struct DevicesContent: View {
             Button("Cancel", role: .cancel) { removeTarget = nil }
             Button("Remove", role: .destructive) { confirmRemove(device) }
         } message: { device in
-            Text("Remove \(device.displayName)? Zhoop will stop connecting to it. Its recorded data is kept and you can re-add it any time.")
+            Text("Remove \(device.displayName)? NOOP will stop connecting to it. Its recorded data is kept and you can re-add it any time.")
         }
         // Restart strap confirm (#166)
         .alert("Restart this strap?",
@@ -452,7 +456,7 @@ private struct DevicesContent: View {
             Image(systemName: "info.circle")
                 .foregroundStyle(StrandPalette.textTertiary)
                 .accessibilityHidden(true)
-            Text("WHOOP is Zhoop's primary, fully-supported band. Other heart-rate straps are an early, in-development addition: they stream live heart rate and HRV, but not WHOOP's deeper sleep and recovery data.")
+            Text("WHOOP is NOOP's primary, fully-supported band. Other heart-rate straps are an early, in-development addition: they stream live heart rate and HRV, but not WHOOP's deeper sleep and recovery data.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -748,6 +752,9 @@ private struct DeviceCard: View {
     var liveBatteryPct: Int? = nil
     /// #592: strap pack voltage (mV) for the active+connected strap; nil otherwise. Shown beside the percent.
     var liveBatteryMv: Int? = nil
+    /// The attached WHOOP 5/MG battery pack's own charge. nil before its pushed pack-info event arrives,
+    /// when no pack is attached, or for every other device family.
+    var livePackSocPct: Double? = nil
     /// The active+connected strap's firmware version (from the connect handshake). nil when not the
     /// active/connected device, or for a source that reports no firmware (e.g. a non-WHOOP strap).
     var liveFirmware: String? = nil
@@ -892,6 +899,14 @@ private struct DeviceCard: View {
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textSecondary)
                             .accessibilityLabel("Battery voltage \(Double(mv) / 1000.0, specifier: "%.2f") volts")
+                    }
+                    // The pack and strap gauges are distinct facts. Show the pack once, only while the
+                    // live event says it exists; detach/disconnect clears the source value.
+                    if let soc = livePackSocPct {
+                        Text("·").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                        Text("Battery pack \(soc, specifier: "%.1f")%")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
                     }
                     if let layout = liveHistoryLayout {
                         Text("·").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
@@ -1129,7 +1144,7 @@ private struct DeviceCard: View {
                 .foregroundStyle(StrandPalette.statusWarning)
                 .frame(width: 14)
                 .accessibilityHidden(true)
-            Text("Paired locally. Zhoop owns this ring while it holds the key. If you reset it again or set it up in the Oura app, Zhoop no longer owns it and you would re-add it to take it over.")
+            Text("Paired locally. NOOP owns this ring while it holds the key. If you reset it again or set it up in the Oura app, NOOP no longer owns it and you would re-add it to take it over.")
                 .font(StrandFont.caption)
                 .foregroundStyle(StrandPalette.statusWarning)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1182,7 +1197,7 @@ struct DeviceCapabilityProfile {
                 displayModel: String(localized: "\(d.brand) (experimental)"),
                 captures: String(localized: "Heart rate (live, best-effort)"),
                 powers: String(localized: "Powers the live console + Effort. No Charge, Rest or Sleep"),
-                footnote: String(localized: "Experimental: live heart rate where the band exposes it. Some bands need a pairing we can't do yet. Zhoop will say so honestly and never show a made-up number. No sleep, recovery, skin temp, SpO₂ or steps."))
+                footnote: String(localized: "Experimental: live heart rate where the band exposes it. Some bands need a pairing we can't do yet. NOOP will say so honestly and never show a made-up number. No sleep, recovery, skin temp, SpO₂ or steps."))
         }
         // EXPERIMENTAL locally-adopted Oura ring (gen 3/4/5). The gen is carried on `model` ("Oura Ring
         // 3/4/5") and recovered with OuraRingGen.from(model:). NOOP reads the ring's OWN raw signals + open
@@ -1365,7 +1380,7 @@ private struct ForgetDeviceSheet: ViewModifier {
                     target = nil
                 }
             } message: { _ in
-                Text("Zhoop removes this device from your list and deletes its recorded data here. You can re-pair the strap to pull its recent history back.")
+                Text("NOOP removes this device from your list and deletes its recorded data here. You can re-pair the strap to pull its recent history back.")
             }
     }
 }
@@ -1477,9 +1492,9 @@ private struct FeatureFlagProbeSheets: ViewModifier {
 /// the result sheet — isolated for the same iOS type-checker reason as `BodyLocationProbeSheets`.
 ///
 /// The wrist selection is deliberately a second, independent confirmation rather than a button inside
-/// the start flow: `SELECT_WRIST` writes strap state that survives a disconnect, and the right/left
-/// mapping is inferred from the client enum's order rather than confirmed on hardware. A persistent
-/// write nobody has verified is exactly the kind of thing that should cost a deliberate extra tap.
+/// the start flow: `SELECT_WRIST` writes strap state that survives a disconnect. The right/left mapping
+/// is no longer a guess (right=1/left=2, from the official parser and the firmware constructor), but a
+/// persistent write NOOP has not verified on its own hardware still costs a deliberate extra tap.
 private struct EcgProbeSheets: ViewModifier {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var live: LiveState
@@ -1498,7 +1513,7 @@ private struct EcgProbeSheets: ViewModifier {
                 Button("Set which wrist you wear it on…") { target = nil; wristTarget = device }
                 Button("Cancel", role: .cancel) { target = nil }
             } message: { _ in
-                Text("Zhoop is not a medical device and this is not an ECG test. It asks your MG to start its ECG subsystem and logs whatever comes back — unvalidated instrumentation for protocol research, never a measurement or a diagnosis, including any heart-rhythm classification the strap happens to send. Don't use it to make a health decision; see a doctor if you have symptoms.\n\nHold the two indents on the clasp with the fingers of your other hand for the whole capture. The MG measures across your wrist AND that clasp, so until you hold it the circuit is open, the strap has nothing to record, and you would see zero packets whatever the firmware did.\n\nNobody has confirmed a strap honours these commands, so the likely outcome is that nothing happens. Everything here is reversible: “Stop” turns the streams back off. Results land in the strap log.")
+                Text("NOOP is not a medical device and this is not an ECG test. It asks your MG to start its ECG subsystem and logs whatever comes back — unvalidated instrumentation for protocol research, never a measurement or a diagnosis, including any heart-rhythm classification the strap happens to send. Don't use it to make a health decision; see a doctor if you have symptoms.\n\nHold the two indents on the clasp with the fingers of your other hand for the whole capture. The MG measures across your wrist AND that clasp, so until you hold it the circuit is open, the strap has nothing to record, and you would see zero packets whatever the firmware did.\n\nNobody has confirmed a strap honours these commands, so the likely outcome is that nothing happens. Everything here is reversible: “Stop” turns the streams back off. Results land in the strap log.")
             }
             // Wrist selection: its own step, with its own confirmation and its own warning.
             //
@@ -1566,8 +1581,8 @@ private struct FeatureFlagProbeResultView: View {
 
 /// The wrist-selection step: the one ECG command that writes strap state outliving the session, so it
 /// gets its own screen, its own warning, and its own confirmation rather than a button inside the start
-/// flow. The copy names both caveats plainly — that the value persists on the strap, and that the
-/// left/right mapping is read off the order in WHOOP's own app rather than verified on hardware.
+/// flow. The copy names both facts plainly — that the value persists on the strap, and where the
+/// left/right mapping comes from.
 private struct EcgWristSheet: View {
     let onPick: (Whoop5Ecg.WristSelection) -> Void
     let onCancel: () -> Void
@@ -1581,7 +1596,7 @@ private struct EcgWristSheet: View {
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.statusWarning)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("It is also not fully confirmed. Which value means “left” and which means “right” is read off the order they appear in WHOOP's own app, not verified on a strap — so it may set the opposite wrist. You can send it again with the other choice at any time, and it changes nothing about your recorded data.")
+            Text("Which value means “left” and which means “right” comes from WHOOP's own app and the strap firmware, not from a strap NOOP has tested. You can send it again with the other choice at any time, and it changes nothing about your recorded data.")
                 .font(StrandFont.caption)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1752,7 +1767,7 @@ struct DeviceCardCatalog: View {
 
     var body: some View {
         ScreenScaffold(title: "Devices",
-                       subtitle: "What each band captures (and what Zhoop uses it for).",
+                       subtitle: "What each band captures (and what NOOP uses it for).",
                        topBackground: liquidScaffoldSky()) {
             VStack(spacing: NoopMetrics.gap) {
                 DeviceCard(device: Self.dev("whoop-4d", "WHOOP", "4.0", Self.whoopCaps),
@@ -1760,7 +1775,8 @@ struct DeviceCardCatalog: View {
                            onMakeActive: {}, onRename: {}, onRemove: nil)
                 DeviceCard(device: Self.dev("whoop-5d", "WHOOP", "5.0 MG",
                                             Self.whoopCaps.union([.steps])),
-                           isActive: false, isLiveConnected: false,
+                           isActive: true, isLiveConnected: true,
+                           liveBatteryPct: 64, livePackSocPct: 56.9,
                            onMakeActive: {}, onRename: {}, onRemove: {})
                 // #221: a WHOOP 5/MG that's BLE-connected but whose encrypted bond was refused (#78) — no
                 // data flows despite the link being up. Renders the "Connected · not paired" pill + the
@@ -1769,7 +1785,7 @@ struct DeviceCardCatalog: View {
                 DeviceCard(device: Self.dev("whoop-5-refused", "WHOOP", "5.0 MG",
                                             Self.whoopCaps.union([.steps])),
                            isActive: true, isLiveConnected: true, bondRefused: true,
-                           pairingHint: "Zhoop can see your strap but it's refusing to pair - it's likely still bonded to the official WHOOP app, or your phone is holding an old pairing. To fix it: (1) fully close the WHOOP app, (2) on a 5.0/MG, tap the band repeatedly until the LEDs flash blue (pairing mode), (3) if your strap is listed under iPhone Settings → Bluetooth, tap it and choose Forget This Device, then reconnect in Zhoop.",
+                           pairingHint: "NOOP can see your strap but it's refusing to pair - it's likely still bonded to the official WHOOP app, or your phone is holding an old pairing. To fix it: (1) fully close the WHOOP app, (2) on a 5.0/MG, tap the band repeatedly until the LEDs flash blue (pairing mode), (3) if your strap is listed under iPhone Settings → Bluetooth, tap it and choose Forget This Device, then reconnect in NOOP.",
                            onMakeActive: {}, onRename: {}, onRemove: {})
                 DeviceCard(device: Self.dev("strap-d", "Polar", "H10", [.hr, .hrv]),
                            isActive: false, isLiveConnected: false,
@@ -1825,7 +1841,7 @@ struct BondRefusedDemoScreen: View {
                                             capabilities: WhoopLiveCapabilities.metrics(forModel: "5.0 MG"),
                                             status: .active, addedAt: 0, lastSeenAt: 0),
                        isActive: true, isLiveConnected: true, bondRefused: true,
-                       pairingHint: "Zhoop can see your strap but it's refusing to pair - it's likely still bonded to the official WHOOP app, or your phone is holding an old pairing. To fix it: (1) fully close the WHOOP app, (2) on a 5.0/MG, tap the band repeatedly until the LEDs flash blue (pairing mode), (3) if your strap is listed under iPhone Settings → Bluetooth, tap it and choose Forget This Device, then reconnect in Zhoop.",
+                       pairingHint: "NOOP can see your strap but it's refusing to pair - it's likely still bonded to the official WHOOP app, or your phone is holding an old pairing. To fix it: (1) fully close the WHOOP app, (2) on a 5.0/MG, tap the band repeatedly until the LEDs flash blue (pairing mode), (3) if your strap is listed under iPhone Settings → Bluetooth, tap it and choose Forget This Device, then reconnect in NOOP.",
                        onMakeActive: {}, onRename: {}, onRemove: {})
         }
     }

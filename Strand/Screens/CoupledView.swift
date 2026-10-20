@@ -59,8 +59,8 @@ struct CoupledView: View {
     /// Recovery cold-start: nights banked so far while the HRV baseline still seeds, nil once recovery
     /// exists. The SAME pure helper Today's ring reads, so the two screens can't disagree.
     private var calibrationNights: Int? {
-        RecoveryScorer.calibrationNights(nightlyHrv: repo.days.map(\.avgHrv),
-                                         dayKeys: repo.days.map(\.day),
+        RecoveryScorer.calibrationNights(nightlyHrv: repo.chargeBaselines?.hrvHistory.values ?? [],
+                                         dayKeys: repo.chargeBaselines?.hrvHistory.dayKeys ?? [],
                                          hasRecovery: day?.recovery != nil)
     }
 
@@ -506,7 +506,7 @@ struct CoupledView: View {
     // (a coupled read of NOOP's OWN scores, same data, different lens) without the branding word. The
     // matching Android caption is byte-identical.
     private var footerCaption: some View {
-        Text("A classic one-glance read of Zhoop's own scores. Same data, different lens.")
+        Text("A classic one-glance read of NOOP's own scores. Same data, different lens.")
             .font(StrandFont.footnote)
             .foregroundStyle(StrandPalette.textTertiary)
             .fixedSize(horizontal: false, vertical: true)
@@ -527,16 +527,16 @@ struct CoupledView: View {
         return carriedRecoveryDay
     }
 
-    /// The ordered Charge drivers for the displayed ring PLUS the confidence tier from the SAME folded HRV
-    /// baseline — the exact TodayView derivation (pure engine scoring against the folded personal
-    /// baselines). nil for a calibrating / cold-start night, which gates the sheet through to the countdown
-    /// instead. PERF: mirrors TodayView.chargeBreakdown() — the old `chargeDrivers` property plus the
-    /// sheet's inline confidence fold re-folded the full `repo.days` history four times per body eval of
-    /// the open sheet; one call now folds each series exactly once, guards before any fold.
+    /// The ordered Charge drivers for the displayed ring PLUS the confidence tier from the SAME HRV
+    /// baseline — the exact TodayView derivation (pure engine scoring against `repo.chargeBaselines`, the
+    /// personal baselines resolved with the engine's own rule, #2525). nil for a calibrating / cold-start
+    /// night, which gates the sheet through to the countdown instead. PERF: mirrors
+    /// TodayView.chargeBreakdown() — the baselines are resolved once per refresh, so a body evaluation of
+    /// the open sheet folds nothing.
     private func chargeBreakdown() -> (drivers: [ChargeDriver], confidence: ScoreConfidence)? {
         guard let row = breakdownRow else { return nil }
-        return ChargeBreakdownWiring.breakdown(days: repo.days, row: row, sleepPerfPercent: sleepPerformance,
-                                               hrvBaselineEpoch: Baselines.hrvBaselineEpoch())
+        guard let baselines = repo.chargeBaselines else { return nil }
+        return ChargeBreakdownWiring.breakdown(baselines: baselines, row: row, sleepPerfPercent: sleepPerformance)
     }
 
     @ViewBuilder

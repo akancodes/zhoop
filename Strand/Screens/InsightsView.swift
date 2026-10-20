@@ -245,7 +245,7 @@ struct InsightsView: View {
                     if behaviours.isEmpty {
                         // No journal yet, explain, without dead-ending on a paid export.
                         NoopCard {
-                            Text("Log behaviours above. After a few days of answers, Zhoop ranks how each one moves your charge, HRV and rest. Importing a WHOOP export (which includes its journal) backfills history instantly.")
+                            Text("Log behaviours above. After a few days of answers, NOOP ranks how each one moves your charge, HRV and rest. Importing a WHOOP export (which includes its journal) backfills history instantly.")
                                 .font(StrandFont.subhead)
                                 .foregroundStyle(StrandPalette.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -573,7 +573,7 @@ struct InsightsView: View {
                     Text("Run a clean personal test")
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Text("Pick one behaviour you log, one outcome, and a short window. Zhoop compares the days you log the behaviour against your behaviour-free days before the start.")
+                    Text("Pick one behaviour you log, one outcome, and a short window. NOOP compares the days you log the behaviour against your behaviour-free days before the start.")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -750,9 +750,8 @@ struct InsightsView: View {
 
     /// Behaviours the user actually has data for: distinct logged journal questions
     /// (`behaviours.keys`) ∪ imported-export questions, minus the catalog's hidden set.
-    /// Triage fix (a)/(b): we do NOT route this through `mergeCatalog`, which would inject
-    /// the whole starter catalog (and re-surface hidden behaviours) as eligible, so the
-    /// empty-state guard is real and only behaviours with history can be tested.
+    /// The full catalog resolver includes starter questions without history. Experiment eligibility
+    /// instead includes only behaviours with history and excludes hidden questions.
     private var experimentCandidates: [String] {
         let saved = experimentBehaviour.trimmingCharacters(in: .whitespacesAndNewlines)
         let hidden = Set(catalog.hiddenQuestions.map { $0.trimmingCharacters(in: .whitespaces).lowercased() })
@@ -1153,7 +1152,7 @@ struct InsightsView: View {
             SectionHeader("Activity Cost", overline: "What each activity costs your recovery")
             if activityCosts.isEmpty {
                 NoopCard {
-                    Text("Tag a few sessions of the same activity and Zhoop will learn its personal recovery cost.")
+                    Text("Tag a few sessions of the same activity and NOOP will learn its personal recovery cost.")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -53,7 +53,7 @@ final class LiftLiveActivityController {
         var logLine: String {
             switch self {
             case .askedIOS:    return "Lift Log: strap step sent to the Lock Screen with a light-up alert"
-            case .appOnScreen: return "Lift Log: strap step not lighting the Lock Screen — Zhoop is open on screen"
+            case .appOnScreen: return "Lift Log: strap step not lighting the Lock Screen — NOOP is open on screen"
             case .noBanner:    return "Lift Log: strap step not lighting the Lock Screen — no Lift Log banner is running"
             }
         }
@@ -90,14 +90,14 @@ final class LiftLiveActivityController {
             ? Activity<LiftActivityAttributes>.activities.first(where: Self.isShowing) : nil
         if let adopted { activity = adopted }
 
-        // Shares the existing Live Activity opt-out rather than adding a second switch: a user who
-        // turned Live Activities off meant all of them.
-        guard UnitPrefs.liveActivityEnabled(), let state else {
+        // Its own switch (`UnitPrefs.liftLiveActivityEnabled`), so the everyday heart-rate banner can be off while
+        // the gym banner stays; turning this one off also ends a banner already showing.
+        guard UnitPrefs.liftLiveActivityEnabled(), let state else {
             if activity != nil { Task { await end() } }
             return alert ? .noBanner : nil
         }
         if adopted != nil {
-            log("Lift Log: Lock Screen banner picked up again after Zhoop restarted")
+            log("Lift Log: Lock Screen banner picked up again after NOOP restarted")
             waitingForForeground = false
         }
 
@@ -140,8 +140,8 @@ final class LiftLiveActivityController {
             guard UIApplication.shared.applicationState == .active else {
                 if !waitingForForeground {
                     waitingForForeground = true
-                    log("Lift Log: no Lock Screen banner — iOS starts one only while Zhoop is open, so it "
-                        + "comes back the next time Zhoop is opened")
+                    log("Lift Log: no Lock Screen banner — iOS starts one only while NOOP is open, so it "
+                        + "comes back the next time NOOP is opened")
                 }
                 return alert ? .noBanner : nil
             }

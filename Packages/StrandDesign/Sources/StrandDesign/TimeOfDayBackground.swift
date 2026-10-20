@@ -11,7 +11,7 @@ import SwiftUI
 //    very low opacity; stars are tiny crisp dots. Beauty = restraint, spacing, type, motion.
 //  - TOKENS first (`StrandPalette`). The only literal hexes are the few subtle atmosphere
 //    tints the spec calls for (warm peach lift, indigo wash, etc.) — kept deliberately faint.
-//  - Reduce Motion — and Low Power Mode, and the in-app "Reduce motion in Zhoop" toggle —
+//  - Reduce Motion — and Low Power Mode, and the in-app "Reduce motion in NOOP" toggle —
 //    pin every drifting element still (no looping translation, and the frame loop is `paused:`).
 //  - Light mode is even MORE restrained: warm-paper tints, fewer/softer elements.
 //  - CPU-light: drift runs off a single `TimelineView(.animation)` tick that the system
@@ -53,7 +53,7 @@ public struct TimeOfDayBackground: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
-    /// Low Power Mode and the in-app "Reduce motion in Zhoop" toggle, neither of which has a SwiftUI
+    /// Low Power Mode and the in-app "Reduce motion in NOOP" toggle, neither of which has a SwiftUI
     /// environment key. The Android twin (`TimeOfDayBackground.kt`) has consulted battery saver since
     /// #911; this side was left reading Reduce Motion alone.
     @ObservedObject private var motion = NoopMotionState.shared
@@ -242,13 +242,22 @@ private struct FloatingLayer: View {
 
     var body: some View {
         // One animation clock drives every shape's horizontal phase. The system pauses this
-        // TimelineView while off-screen, so it costs nothing when not visible.
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !drift)) { timeline in
-            let t = drift ? timeline.date.timeIntervalSinceReferenceDate : 0
-            ZStack {
-                ForEach(shapes.indices, id: \.self) { i in
-                    floater(shapes[i], t: t)
-                }
+        // TimelineView while off-screen, so it costs nothing when not visible. Without drift the shapes rest
+        // at phase 0 with no timeline at all: a `paused:` one keeps the render server busy (see
+        // `ChargeSyncMorph.body`).
+        if drift {
+            TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { timeline in
+                shapesLayer(t: timeline.date.timeIntervalSinceReferenceDate)
+            }
+        } else {
+            shapesLayer(t: 0)
+        }
+    }
+
+    private func shapesLayer(t: TimeInterval) -> some View {
+        ZStack {
+            ForEach(shapes.indices, id: \.self) { i in
+                floater(shapes[i], t: t)
             }
         }
     }
