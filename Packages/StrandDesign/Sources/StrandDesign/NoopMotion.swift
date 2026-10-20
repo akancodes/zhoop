@@ -76,10 +76,10 @@ public enum NoopMotion {
 //   1. `@Environment(\.accessibilityReduceMotion)` — the system-wide setting. Supplied by the call
 //      site, because only a View can read the environment.
 //   2. Low Power Mode — the OS-level "stop discretionary work" signal.
-//   3. "Reduce motion in Zhoop" — an in-app preference, default OFF, for people who want the app
+//   3. "Reduce motion in NOOP" — an in-app preference, default OFF, for people who want the app
 //      quiet without putting the whole phone in battery saver.
 
-/// "Reduce motion in Zhoop" (opt-in, default OFF): pose every looping animation still and stop the
+/// "Reduce motion in NOOP" (opt-in, default OFF): pose every looping animation still and stop the
 /// decorative motion sensor, without requiring system Low Power Mode or system Reduce Motion.
 /// Toggled from Settings → Appearance.
 ///
@@ -94,7 +94,7 @@ public enum QuietMotionPrefs {
 }
 
 /// Publishes the two motion signals that have no SwiftUI environment key — Low Power Mode and the
-/// in-app "Reduce motion in Zhoop" preference — so any view can pose its looping animation still.
+/// in-app "Reduce motion in NOOP" preference — so any view can pose its looping animation still.
 ///
 /// A singleton with ONE `NotificationCenter` observer rather than a per-view `DisposableEffect`,
 /// for the reason #911 gives on the Android side: the liquid primitives alone have dozens of call
@@ -127,7 +127,7 @@ public final class NoopMotionState: ObservableObject {
     /// `scenePhase` covers what it does not; this is the gap AppKit leaves.
     @Published public private(set) var windowObscured: Bool = false
 
-    /// The in-app "Reduce motion in Zhoop" preference. Kept in step with `UserDefaults` so a
+    /// The in-app "Reduce motion in NOOP" preference. Kept in step with `UserDefaults` so a
     /// non-SwiftUI reader (the motion sensor) and the `@AppStorage` toggle never disagree.
     @Published public private(set) var quietMotion: Bool
 

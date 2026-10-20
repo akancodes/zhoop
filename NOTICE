@@ -38,13 +38,3 @@ re-implements those facts as original code — it does not copy their source.
 
 See ATTRIBUTION.md for fuller credit and DISCLAIMER.md for the interoperability and
 fair-use rationale.
-
-Zhoop fork
-----------
-
-Zhoop is a fork of NOOP (https://github.com/ryanbr/noop), modified to fit its
-author's own weight-loss and fitness needs. NOOP's code and documentation, and the
-notices above, are carried over unchanged in their terms. Zhoop's changes are
-distributed under the same PolyForm Noncommercial License 1.0.0.
-
-Required Notice: Copyright 2026 NoopApp
