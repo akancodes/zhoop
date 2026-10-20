@@ -23,7 +23,8 @@ import { createPrivateKey, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 const PREFIX = process.env.BUNDLE_ID_PREFIX || "dev.akan.zhoop";
-const APP = `${PREFIX}.noop`;
+// APP_BUNDLE_ID points the read-only "status" at another of the team's apps (AkanPanel, Dikte).
+const APP = process.env.APP_BUNDLE_ID || `${PREFIX}.noop`;
 const GROUP = "Bayram";
 const IDS = [
   [APP, "Zhoop"],

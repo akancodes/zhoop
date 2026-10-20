@@ -16,9 +16,16 @@ on:
         description: Take the testers off Zhoop, put them back in the group and invite them afresh
         type: boolean
         default: false
+      add:
+        description: Add the testers to the internal group (made if missing) and invite them
+        type: boolean
+        default: false
       testers:
         description: First names of App Store Connect users, comma-separated
         default: Bayram
+      bundles:
+        description: Also print the status of these apps (bundle ids, space-separated), read only
+        default: ""
 
 permissions:
   contents: read
@@ -50,8 +57,16 @@ jobs:
         if: inputs.reinvite
         run: node .github/scripts/asc.mjs reinvite "$RUNNER_TEMP/AuthKey.p8"
 
+      - name: Add to the group
+        if: inputs.add
+        run: node .github/scripts/asc.mjs testers "$RUNNER_TEMP/AuthKey.p8"
+
       - name: Status
-        run: node .github/scripts/asc.mjs status "$RUNNER_TEMP/AuthKey.p8"
+        env:
+          BUNDLES: ${{ inputs.bundles }}
+        run: |
+          node .github/scripts/asc.mjs status "$RUNNER_TEMP/AuthKey.p8"
+          for b in $BUNDLES; do APP_BUNDLE_ID="$b" node .github/scripts/asc.mjs status "$RUNNER_TEMP/AuthKey.p8"; done
 
       - name: Forget the key
         if: always()
