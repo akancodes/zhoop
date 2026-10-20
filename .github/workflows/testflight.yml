@@ -1,0 +1,183 @@
+name: TestFlight
+
+# Zhoop on Bayram's iPhone through the AKES team's TestFlight: internal testing only, never submitted for review,
+# never public. A pull request registers the App IDs and compiles the app for the simulator, unsigned; a push to
+# main (or a manual run) archives it with Xcode's cloud-managed signing through the App Store Connect API key,
+# uploads it, and waits until TestFlight has processed it.
+#
+# The upstream NOOP workflows are not in this fork: they build and publish NOOP's own releases.
+#
+# App Group: API-key signing cannot register one. Until group.dev.akan.zhoop.noop.staging exists in the developer
+# portal and is ticked on every App ID (then set the repository variable APP_GROUP to "on"), the build leaves out
+# the widgets / Live Activity extension and the Apple Watch app and drops the application-groups entitlement.
+# The app keeps its database in its own container either way; without the group those surfaces simply stay empty.
+#
+# Secrets (copied from akancodes/dikte, rotate together): APPLE_TEAM_ID, ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore: ["**/*.md", "docs/**", "android/**", "marketing/**", ".github/ISSUE_TEMPLATE/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUNDLE_ID_PREFIX: dev.akan.zhoop
+  APP_GROUP: ${{ vars.APP_GROUP }}
+
+jobs:
+  build:
+    # The app needs the iOS 26 SDK (Liquid Glass), and App Store Connect refuses anything older.
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      UPLOAD: ${{ github.event_name != 'pull_request' }}
+      # Empty on a fork's pull request, which gets no secrets.
+      HAS_KEY: ${{ secrets.ASC_KEY_ID != '' }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pick Xcode 26
+        run: |
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XC" ]; then ls -d /Applications/Xcode*.app; echo "No Xcode 26 on this runner"; exit 1; fi
+          sudo xcode-select -s "$XC"
+
+      # Config/BundleIdSecrets.xcconfig is the gitignored file Config/BundleId.xcconfig includes.
+      - name: Signing identifiers
+        env:
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: printf 'BUNDLE_ID_PREFIX = %s\nDEVELOPMENT_TEAM = %s\n' "$BUNDLE_ID_PREFIX" "$TEAM" > Config/BundleIdSecrets.xcconfig
+
+      - name: Shape the project for TestFlight
+        run: |
+          command -v yq >/dev/null || brew install yq
+          # Exempt encryption only (HTTPS and the system's crypto), so TestFlight does not hold every build for
+          # an export-compliance answer.
+          yq -i '.targets.NOOPiOS.info.properties.ITSAppUsesNonExemptEncryption = false' project.yml
+          if [ "$APP_GROUP" != "on" ]; then
+            yq -i '
+              del(.targets.NOOPiOS.entitlements.properties."com.apple.security.application-groups") |
+              .targets.NOOPiOS.dependencies |= map(select(.target != "NOOPiOSWidgets" and .target != "NOOPWatch"))
+            ' project.yml
+            echo "::notice::Built without the App Group: no widgets, Live Activity or Apple Watch app."
+          fi
+          yq '.targets.NOOPiOS.dependencies, .targets.NOOPiOS.entitlements' project.yml
+
+      - name: Generate the Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -version
+
+      - name: App Store Connect key
+        if: env.HAS_KEY == 'true'
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          echo "AUTH=-allowProvisioningUpdates -authenticationKeyPath $RUNNER_TEMP/AuthKey.p8 -authenticationKeyID $ASC_KEY_ID -authenticationKeyIssuerID $ASC_ISSUER_ID" >> "$GITHUB_ENV"
+
+      - name: Register the App IDs
+        if: env.HAS_KEY == 'true'
+        run: node .github/scripts/asc.mjs bundle-ids "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Compile for the simulator (unsigned)
+        if: env.UPLOAD != 'true'
+        run: >
+          xcodebuild build -quiet
+          -project Strand.xcodeproj -scheme NOOPiOS -configuration Debug
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+
+      - name: Check App Store Connect has the app
+        if: env.UPLOAD == 'true'
+        run: node .github/scripts/asc.mjs app "$RUNNER_TEMP/AuthKey.p8"
+
+      # Every fresh runner makes a new Apple Development certificate, and the team's cap is shared with
+      # AkanPanel's and Dikte's builds. Only the ones earlier runs made ("Created via API") go.
+      - name: Revoke development certificates left by earlier runs
+        if: env.UPLOAD == 'true'
+        run: node .github/scripts/asc.mjs revoke-dev-certs "$RUNNER_TEMP/AuthKey.p8"
+
+      # Cloud signing can create a profile mid-build that Xcode 26 then looks for before it is written
+      # ("Build input file cannot be found: ...mobileprovision"); one more try gets past it.
+      - name: Archive
+        if: env.UPLOAD == 'true'
+        run: |
+          mkdir -p "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          archive() {
+            xcodebuild archive -quiet \
+              -project Strand.xcodeproj -scheme NOOPiOS -configuration Release \
+              -destination 'generic/platform=iOS' \
+              -archivePath "$RUNNER_TEMP/Zhoop.xcarchive" \
+              DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} \
+              CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+              $AUTH
+          }
+          archive || { echo "::warning::Archive failed once; trying again with the profiles now on disk"; archive; }
+
+      - name: Upload to TestFlight
+        if: env.UPLOAD == 'true'
+        run: |
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+            <key>testFlightInternalTestingOnly</key><true/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Zhoop.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            $AUTH
+
+      - name: Internal testers
+        if: env.UPLOAD == 'true'
+        continue-on-error: true
+        env:
+          TESTERS: Bayram
+        run: node .github/scripts/asc.mjs testers "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Forget the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
+
+  # Apple processes an upload for a few minutes to half an hour before TestFlight offers it; a cheap runner waits.
+  processing:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/scripts
+      - name: Wait for TestFlight
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          node .github/scripts/asc.mjs processing "$RUNNER_TEMP/AuthKey.p8"
+      - name: Forget the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
