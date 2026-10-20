@@ -38,7 +38,7 @@ panel is where WHOOP data is read: weekly averages, never a daily verdict.
 Every addition ships switched OFF: TestFlight can update the phone overnight, so a build never changes his data or his
 alarm until he turns something on.
 
-- **Strap active energy to Apple Health** (2026-10-20, PR #3). Switch: Apple Health → "Write strap active energy".
+- **Strap active energy to Apple Health** (2026-10-20, PR #3, TestFlight build 8). Switch: Apple Health → "Write strap active energy".
   - Writes hourly `activeEnergyBurned` samples for the last 14 days and onward.
   - The figure is the `activeKcal` half of `Calories.estimateDayEnergy`: energy above the resting rate while the
     heart rate is at exercise level (half the heart-rate reserve and up). An easy walk counts as resting, so this
@@ -48,7 +48,7 @@ alarm until he turns something on.
   - Dedup like the vitals: key `noop:activeEnergy:<hourStart>`. A recomputed day deletes all of its hour keys from
     NOOP's source before saving. Switching off deletes what it wrote.
   - The share permission was already requested for workout energy, so there is no new Health prompt.
-- **"Ring my iPhone too"** (2026-10-20, PR #3). Switch: Alarms → strap alarm card, shown on iOS 26+.
+- **"Ring my iPhone too"** (2026-10-20, PR #3, TestFlight build 8). Switch: Alarms → strap alarm card, shown on iOS 26+.
   - Schedules AlarmKit alarms at the strap alarm's own times, weekdays and per-day overrides: one weekly-repeating
     alarm per distinct time, with stable ids, synced from `AppModel.applySmartAlarm`.
   - It sounds through silent mode and Focus, and needs NOOP's Alarms permission (asked when switched on).
