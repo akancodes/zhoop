@@ -16,6 +16,9 @@
 //   status            prints the newest builds with their TestFlight state, the app's groups, the builds each
 //                     group holds and its testers (with the state of their invitation)
 //   invite            sends (or sends again) the TestFlight invitation email to the testers named in TESTERS
+//   reinvite          takes the testers named in TESTERS off this app only (their other apps keep them), puts
+//                     them back in the internal group and sends a fresh invitation: the fix forum threads report
+//                     for a tester stuck at INVITED whose email never comes
 import { createPrivateKey, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -215,6 +218,40 @@ const commands = {
         },
       });
       console.log(`${t.attributes.firstName}: ${r.status < 300 ? "invitation sent" : `not sent (${r.status}) ${JSON.stringify(r.json).slice(0, 400)}`}`);
+    }
+  },
+
+  async reinvite() {
+    const app = await findApp();
+    if (!app) throw new Error(`No App Store Connect app for ${APP}`);
+    const groups = (await api(`/v1/apps/${app.id}/betaGroups?limit=50`)).json.data;
+    const group = groups.find((g) => g.attributes.isInternalGroup && g.attributes.name === GROUP);
+    if (!group) throw new Error(`No internal group "${GROUP}"`);
+    const plain = (s) => (s ?? "").normalize("NFD").replace(/\p{M}/gu, "").trim().toLowerCase();
+    const wanted = (process.env.TESTERS ?? "").split(",").map(plain).filter(Boolean);
+    const testers = (await api(`/v1/betaTesters?filter[apps]=${app.id}&limit=200`)).json.data
+      .filter((t) => wanted.includes(plain(t.attributes.firstName)));
+    for (const t of testers) {
+      const ref = { data: [{ type: "betaTesters", id: t.id }] };
+      const off = await api(`/v1/apps/${app.id}/relationships/betaTesters`, { method: "DELETE", soft: true, body: ref });
+      console.log(`${t.attributes.firstName}: off ${APP} (${off.status})`);
+      await new Promise((r) => setTimeout(r, 5_000));
+      const on = await api(`/v1/betaGroups/${group.id}/relationships/betaTesters`, { method: "POST", soft: true, body: ref });
+      console.log(`${t.attributes.firstName}: back in "${GROUP}" (${on.status})${on.status >= 300 ? ` ${JSON.stringify(on.json).slice(0, 300)}` : ""}`);
+      const inv = await api("/v1/betaTesterInvitations", {
+        method: "POST",
+        soft: true,
+        body: {
+          data: {
+            type: "betaTesterInvitations",
+            relationships: {
+              app: { data: { type: "apps", id: app.id } },
+              betaTester: { data: { type: "betaTesters", id: t.id } },
+            },
+          },
+        },
+      });
+      console.log(`${t.attributes.firstName}: invitation ${inv.status < 300 ? "sent" : `not sent (${inv.status}) ${JSON.stringify(inv.json).slice(0, 300)}`}`);
     }
   },
 };
