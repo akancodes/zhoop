@@ -152,7 +152,8 @@ struct StrandiOSApp: App {
         let bridge = HealthKitBridge(
             repo: model.repo,
             appleDeviceId: model.appleDeviceId,
-            noopDeviceId: model.deviceId
+            noopDeviceId: model.deviceId,
+            profile: model.profile
         )
         _health = StateObject(wrappedValue: bridge)
         // Register a separate, always-on-while-authorized refresh task for Apple Health write-back.

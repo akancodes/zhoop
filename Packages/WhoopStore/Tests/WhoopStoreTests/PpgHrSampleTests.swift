@@ -32,6 +32,34 @@ final class PpgHrSampleTests: XCTestCase {
         XCTAssertEqual(n2, 2)
     }
 
+    /// The PPG fingerprint moves when a PPG-only stretch lands, which `hrFingerprint` does not see at all:
+    /// the case a cache over `hrSamples` (the iOS Health energy write) has to treat as a change.
+    func testPpgHrFingerprintSeesWhatHrFingerprintMisses() async throws {
+        let store = try await WhoopStore.inMemory()
+        let dev = "my-whoop"
+        let base = 1_780_000_000
+        try await store.insert(Streams(hr: [HRSample(ts: base, bpm: 90)]), deviceId: dev)
+        let hrBefore = try await store.hrFingerprint(deviceId: dev, from: base, to: base + 3_600)
+        let ppgBefore = try await store.ppgHrFingerprint(deviceId: dev, from: base, to: base + 3_600)
+        XCTAssertEqual(ppgBefore.count, 0)
+        XCTAssertEqual(ppgBefore.maxTs, 0)
+        try await store.insert(Streams(ppgHr: [
+            PpgHrSample(ts: base + 60, bpm: 70, conf: 0.9),
+            PpgHrSample(ts: base + 61, bpm: 71, conf: 0.9),
+        ]), deviceId: dev)
+        let hrAfter = try await store.hrFingerprint(deviceId: dev, from: base, to: base + 3_600)
+        let ppgAfter = try await store.ppgHrFingerprint(deviceId: dev, from: base, to: base + 3_600)
+        XCTAssertEqual(hrAfter.count, hrBefore.count, "the measured fingerprint does not move")
+        XCTAssertEqual(hrAfter.maxTs, hrBefore.maxTs)
+        XCTAssertEqual(ppgAfter.count, 2)
+        XCTAssertEqual(ppgAfter.maxTs, base + 61)
+        // Inclusive window and device scope, like `hrFingerprint`.
+        let windowed = try await store.ppgHrFingerprint(deviceId: dev, from: base + 61, to: base + 61)
+        XCTAssertEqual(windowed.count, 1)
+        let other = try await store.ppgHrFingerprint(deviceId: "other", from: base, to: base + 3_600)
+        XCTAssertEqual(other.count, 0)
+    }
+
     /// hrBuckets COALESCEs: a measured second wins, a PPG-only second fills the gap.
     func testHrBucketsCoalescesPpgWhereNoMeasuredHr() async throws {
         let store = try await WhoopStore.inMemory()

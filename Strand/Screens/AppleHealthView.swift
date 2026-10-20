@@ -47,6 +47,8 @@ struct AppleHealthView: View {
     #if os(iOS)
     @EnvironmentObject private var health: HealthKitBridge
     @EnvironmentObject private var model: AppModel
+    /// The strap active-energy write (fork), OFF by default. The bridge reads the same key on every pass.
+    @AppStorage(HealthKitBridge.activeEnergyWriteKey) private var writeActiveEnergy = false
     #endif
 
     // Imperial/Metric display preference (D#103). Weight and lean mass (stored kg) re-label to lb here;
@@ -467,6 +469,7 @@ struct AppleHealthView: View {
                     .buttonStyle(.bordered)
                     .tint(StrandPalette.metricCyan)
                     .disabled(health.syncing)
+                    activeEnergyRow
                 }
 
                 if let err = health.lastError {
@@ -476,6 +479,38 @@ struct AppleHealthView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    /// The strap active-energy switch (fork). The write itself is `HealthKitBridge.writeActiveEnergy`; a
+    /// flip runs one write-back straight away, which writes the window or, switched off, takes it back.
+    @ViewBuilder
+    private var activeEnergyRow: some View {
+        Divider().overlay(StrandPalette.hairline)
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Write strap active energy")
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text("Adds what your strap's heart rate burns above your resting rate to Apple Health as Active Energy, hour by hour, for the last 14 days and onward. Only exercise-level heart rate counts; an easy walk mostly does not. Turning it off removes what NOOP wrote.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Toggle("", isOn: $writeActiveEnergy)
+                .labelsHidden().toggleStyle(.switch).tint(StrandPalette.metricCyan)
+                .accessibilityLabel("Write strap active energy")
+                .onChangeCompat(of: writeActiveEnergy) { _ in
+                    Task { _ = await health.writeBackAfterNewData() }
+                }
+        }
+        .frame(minHeight: 42)
+        if writeActiveEnergy && !health.canWriteActiveEnergy {
+            Text("Apple Health is not letting NOOP write Active Energy, so nothing is written. Allow it under Settings › Health › Data Access & Devices › NOOP.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.statusWarning)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
     #endif

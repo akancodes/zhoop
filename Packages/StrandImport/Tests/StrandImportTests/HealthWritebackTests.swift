@@ -224,6 +224,22 @@ final class HealthWritebackTests: XCTestCase {
         XCTAssertEqual(HealthWriteback.appleHealthWorkoutKeyPrefix, "noop:workout:")
     }
 
+    /// Switching the energy write off deletes what carries this prefix, so it has to match every energy key
+    /// and nothing that any other kind writes, workouts above all (they share the type and the source).
+    func testActiveEnergyKeyPrefixMatchesOnlyEnergyKeys() {
+        let key = HealthWriteback.appleHealthActiveEnergyKey(hourStartTs: 1_700_000_000)
+        XCTAssertEqual(key, "noop:activeEnergy:1700000000")
+        XCTAssertTrue(key.hasPrefix(HealthWriteback.appleHealthActiveEnergyKeyPrefix))
+        XCTAssertTrue(HealthWriteback.appleHealthActiveEnergyKey(hourStartTs: 0)
+                        .hasPrefix(HealthWriteback.appleHealthActiveEnergyKeyPrefix))
+        for other in [HealthWriteback.appleHealthWorkoutKey(startTs: 1_700_000_000),
+                      HealthWriteback.appleHealthSleepKey(startTs: 1_700_000_000),
+                      HealthWriteback.appleHealthVitalKey(metricId: "HKQuantityTypeIdentifierActiveEnergyBurned",
+                                                          day: "2026-01-01")] {
+            XCTAssertFalse(other.hasPrefix(HealthWriteback.appleHealthActiveEnergyKeyPrefix), other)
+        }
+    }
+
     /// The prefix must NOT match a sleep or vitals key, or the reconciliation would treat those as
     /// workouts of ours and consider deleting them.
     func testWorkoutKeyPrefixDoesNotMatchOtherKinds() {

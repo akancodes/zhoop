@@ -33,6 +33,30 @@ never go into a commercial product (the AKES apps) or into Nowline.
 NOOP writes what it computes to Apple Health. The AkanPanel iPhone app sends Apple Health to panel.akan.dev, so the
 panel is where WHOOP data is read: weekly averages, never a daily verdict.
 
+## What this fork adds
+
+Every addition ships switched OFF: TestFlight can update the phone overnight, so a build never changes his data or his
+alarm until he turns something on.
+
+- **Strap active energy to Apple Health** (2026-10-20, PR #3). Switch: Apple Health → "Write strap active energy".
+  - Writes hourly `activeEnergyBurned` samples for the last 14 days and onward.
+  - The figure is the `activeKcal` half of `Calories.estimateDayEnergy`: energy above the resting rate while the
+    heart rate is at exercise level (half the heart-rate reserve and up). An easy walk counts as resting, so this
+    is exercise energy, not an Apple Watch style move total.
+  - `Calories.activeEnergyBuckets` splits the same walk into local hours, so a day total in Health equals the day
+    estimate. Windows of workouts NOOP writes are left out, because those workouts carry their own energy sample.
+  - Dedup like the vitals: key `noop:activeEnergy:<hourStart>`. A recomputed day deletes all of its hour keys from
+    NOOP's source before saving. Switching off deletes what it wrote.
+  - The share permission was already requested for workout energy, so there is no new Health prompt.
+- **"Ring my iPhone too"** (2026-10-20, PR #3). Switch: Alarms → strap alarm card, shown on iOS 26+.
+  - Schedules AlarmKit alarms at the strap alarm's own times, weekdays and per-day overrides: one weekly-repeating
+    alarm per distinct time, with stable ids, synced from `AppModel.applySmartAlarm`.
+  - It sounds through silent mode and Focus, and needs NOOP's Alarms permission (asked when switched on).
+  - No snooze: a snooze is a countdown, and AlarmKit wants a Live Activity widget extension for any countdown, which
+    this build leaves out (no App Group). A plain alert needs no extension.
+  - The strap alarm and its backup notification are unchanged. AlarmKit is linked weak, so older iOS still launches.
+- **Calendar-tied wake time**: designed in PR #3, not built. It needs his rules first.
+
 ## Working here
 
 [AGENTS.md](AGENTS.md) is upstream's contributor guide and describes NOOP's own process. For this fork, iOS is the only
