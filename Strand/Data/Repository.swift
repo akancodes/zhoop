@@ -1251,6 +1251,24 @@ final class Repository: ObservableObject {
         return parts.joined(separator: "|")
     }
 
+    /// When a WHOOP strap last reported firing its own alarm (event STRAP_DRIVEN_ALARM_EXECUTED, 57) at or
+    /// after `since`, over the same strap ids the raw reads use, or nil when none did.
+    ///
+    /// For the Alarms screen's "last strap wake" line (fork). Read from the event table rather than from the
+    /// live hook's `alarm.lastFiredAt`, because the table also holds an event the strap handed over at a later
+    /// sync: with the phone in another room overnight, that is the usual way the report arrives.
+    func latestStrapAlarmFiredTs(since: Int) async -> Int? {
+        guard let store = await ensureStore() else { return nil }
+        var latest: Int?
+        for id in rawPhysiologyReadIds(store: store) {
+            if let ts = try? await store.latestEventTs(deviceId: id, kindPrefix: "STRAP_DRIVEN_ALARM_EXECUTED",
+                                                       from: since) {
+                latest = max(latest ?? ts, ts)
+            }
+        }
+        return latest
+    }
+
     func hrSamples(from: Int, to: Int, limit: Int = 8000) async -> [HRSample] {
         guard let store = await ensureStore() else { return [] }
         // UNION the active strap + canonical so the HR trend renders whether the landed day's raw sits under

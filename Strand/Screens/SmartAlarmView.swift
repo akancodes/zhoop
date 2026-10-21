@@ -21,6 +21,8 @@ struct SmartAlarmView: View {
     // alarm over BLE) and the behavior store (the alarm's persisted on/time/weekdays).
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var behavior: BehaviorStore
+    /// For the "last strap wake" line (fork): the stored alarm-fired events, re-read on every data refresh.
+    @EnvironmentObject private var repo: Repository
 
     @State private var windDownOn = WindDownNudge.isEnabled
     /// Shown when the user flips the nudge on but notifications are denied at the OS level — the reminder
@@ -39,6 +41,12 @@ struct SmartAlarmView: View {
     // FrameRouter). ≥2 = the strap is persistently refusing the alarm (a corrupted clock/alarm register),
     // which the strapRejectedCard surfaces with reset guidance. @AppStorage so it updates live.
     @AppStorage("alarm.rejectStreak") private var alarmRejectStreak = 0
+    /// When the strap last reported firing its alarm (event 57), from the stored events. nil until read or
+    /// when none was reported in the last 30 days.
+    @State private var lastStrapWakeStored: Int?
+    /// The same report as the live hook saw it (`FrameRouter`, `alarm.lastFiredAt`), for the moment between
+    /// the event arriving and the next data refresh. 0 = never.
+    @AppStorage("alarm.lastFiredAt") private var lastStrapWakeLive: Double = 0
     /// Calendar weekday numbers laid out Monday-first (Mon…Sun → 2,3,4,5,6,7,1), matching AutomationsView.
     private static let weekdayOrder = [2, 3, 4, 5, 6, 7, 1]
 
@@ -87,6 +95,10 @@ struct SmartAlarmView: View {
             Button(String(localized: "Not now"), role: .cancel) {}
         } message: {
             Text("Turn on notifications for NOOP in Settings to get your wind-down reminder.")
+        }
+        .task(id: repo.refreshSeq) {
+            lastStrapWakeStored = await repo.latestStrapAlarmFiredTs(
+                since: Int(Date().timeIntervalSince1970) - 30 * 86_400)
         }
         #if os(iOS)
         .onAppear { if phoneAlarmOn { phonePermission = PhoneWakeAlarm.permission } }
@@ -373,6 +385,12 @@ struct SmartAlarmView: View {
                             .foregroundStyle(StrandPalette.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    Divider().overlay(StrandPalette.hairline)
+                    Text(strapWakeReportLine)
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                     #if os(iOS)
                     if PhoneWakeAlarm.isSupported { phoneAlarmRow }
                     #endif
@@ -607,6 +625,27 @@ struct SmartAlarmView: View {
         formatter.locale = AppLanguage.activeLocale
         formatter.setLocalizedDateFormatFromTemplate("EEEE jj:mm")
         return formatter.string(from: next)
+    }
+
+    /// The last wake the strap itself reported (fork): when it last fired its firmware alarm, as event 57.
+    ///
+    /// Only what the strap reported, never an inference. The report travels over Bluetooth, so a wake can
+    /// sit on the strap until the phone next syncs (a phone left in another room overnight), and a missing
+    /// report alone does not prove the strap stayed silent; the line says when a report arrives rather than
+    /// claiming a miss. A different fact from the countdown above (the NEXT alarm), so the two cannot
+    /// disagree.
+    private var strapWakeReportLine: String {
+        let live = lastStrapWakeLive > 0 ? Int(lastStrapWakeLive) : nil
+        guard let ts = [lastStrapWakeStored, live].compactMap({ $0 }).max() else {
+            return String(localized: "No strap wake reported yet. The strap reports a wake over Bluetooth, so it shows here after the phone next syncs with the strap.")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = AppLanguage.activeLocale
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        formatter.doesRelativeDateFormatting = true
+        let when = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+        return String(localized: "Last strap wake reported: \(when). A newer one shows after the phone next syncs with the strap.")
     }
 
     /// Whether switching the alarm on actually arms anything that will go off.
