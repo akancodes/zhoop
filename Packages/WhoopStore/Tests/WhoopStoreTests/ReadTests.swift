@@ -57,6 +57,30 @@ final class ReadTests: XCTestCase {
     // EVERY device's HR (dev1's 100/200/300 + the "other" decoy's 200). This is what lets a night landing
     // under a non-"my-whoop" id (an Oura ring, an Apple Watch, a re-added WHOOP) still advance the analyze
     // watermark — the device-scoped variant read 0 rows for such an install and the gate never fired.
+    /// The Alarms screen's "last strap wake" reads the newest alarm-fired event this way: a prefix match on the
+    /// kind (where `_` must not act as a wildcard), scoped to the device and to `from`, nil when there is none.
+    func testLatestEventTsMatchesKindPrefixInScope() async throws {
+        let store = try await seeded()
+        let fired = "STRAP_DRIVEN_ALARM_EXECUTED"
+        _ = try await store.insert(Streams(events: [
+            WhoopEvent(ts: 400, kind: "STRAP_DRIVEN_ALARM_EXECUTED(57)", payload: [:]),
+            WhoopEvent(ts: 900, kind: "STRAP_DRIVEN_ALARM_EXECUTED(57)", payload: [:]),
+            // Same length, `_` replaced: a LIKE pattern would have matched this.
+            WhoopEvent(ts: 950, kind: "STRAPXDRIVENXALARMXEXECUTED(57)", payload: [:]),
+            WhoopEvent(ts: 980, kind: "HAPTICS_FIRED(60)", payload: [:]),
+        ]), deviceId: "dev1")
+        _ = try await store.insert(Streams(events: [
+            WhoopEvent(ts: 2_000, kind: "STRAP_DRIVEN_ALARM_EXECUTED(57)", payload: [:]),
+        ]), deviceId: "other")
+
+        let latest = try await store.latestEventTs(deviceId: "dev1", kindPrefix: fired, from: 0)
+        XCTAssertEqual(latest, 900)
+        let bounded = try await store.latestEventTs(deviceId: "dev1", kindPrefix: fired, from: 901)
+        XCTAssertNil(bounded, "nothing at or after `from`")
+        let missing = try await store.latestEventTs(deviceId: "dev1", kindPrefix: "NO_SUCH_EVENT", from: 0)
+        XCTAssertNil(missing)
+    }
+
     func testHrFingerprintCrossDeviceFoldsEveryDevice() async throws {
         let store = try await seeded()
         let fp = try await store.hrFingerprint()   // no deviceId → across all devices

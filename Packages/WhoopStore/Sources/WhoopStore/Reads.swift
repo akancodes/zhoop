@@ -637,6 +637,21 @@ extension WhoopStore {
         }
     }
 
+    /// The newest timestamp at or after `from` of an event whose kind starts with `kindPrefix`, or nil when
+    /// there is none. One aggregate, no rows materialised.
+    ///
+    /// A plain prefix compare rather than LIKE: event kinds are names such as
+    /// "STRAP_DRIVEN_ALARM_EXECUTED(57)", and `_` is a LIKE wildcard. Live and offloaded events both land in
+    /// this table, so the answer covers an event the strap only handed over at a later sync.
+    public func latestEventTs(deviceId: String, kindPrefix: String, from: Int) async throws -> Int? {
+        try syncRead { db in
+            try Int.fetchOne(db, sql: """
+                SELECT MAX(ts) FROM event
+                WHERE deviceId = ? AND ts >= ? AND substr(kind, 1, ?) = ?
+                """, arguments: [deviceId, from, kindPrefix.count, kindPrefix])
+        }
+    }
+
     public func events(deviceId: String, from: Int, to: Int, limit: Int) async throws -> [WhoopEvent] {
         try syncRead { db in
             try Row.fetchAll(db, sql: """
