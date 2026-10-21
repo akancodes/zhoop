@@ -55,6 +55,11 @@ alarm until he turns something on.
   - No snooze: a snooze is a countdown, and AlarmKit wants a Live Activity widget extension for any countdown, which
     this build leaves out (no App Group). A plain alert needs no extension.
   - The strap alarm and its backup notification are unchanged. AlarmKit is linked weak, so older iOS still launches.
+- **Last strap wake** (2026-10-21, PR #4, TestFlight build 10). Alarms → strap alarm card, no switch: a read-only line.
+  - Says when the strap last reported firing its own alarm (event `STRAP_DRIVEN_ALARM_EXECUTED`, 57).
+  - Reads the stored events (live and offloaded, through `WhoopStore.latestEventTs`) plus the live hook's
+    `alarm.lastFiredAt`. A wake reported at the morning sync counts, since the phone stays out of the bedroom.
+  - A missing report is never called a missed alarm.
 - **Calendar-tied wake time**: designed in PR #3, not built. It needs his rules first.
 
 ## Working here
